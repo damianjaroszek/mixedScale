@@ -422,6 +422,7 @@ class App {
       else if (e.code === "ArrowLeft") { e.preventDefault(); this.gotoIdea(this.ideaIdx - 1); }
       else if (e.code === "KeyL") A.toggleLoop();
       else if (e.code === "KeyK") B.toggleLoop();
+      else if (e.code === "KeyC") (e.shiftKey ? B : A).addCueHere();
       else if (/^Digit[1-8]$/.test(e.code)) (e.shiftKey ? B : A).jumpCue(Number(e.code.slice(5)) - 1);
       else return;
       this.syncTestButton();

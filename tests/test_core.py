@@ -146,3 +146,32 @@ def test_camelot_rules():
     assert camelot.standard_name("8A") == "A Minor" and camelot.standard_name("12B") == "E Major"
     assert camelot.relation("8A", "8B")[1] > camelot.relation("8A", "10A")[1]
     assert camelot.best_shift("8A", "1A")[0] == 1  # G#m up one semitone = Am
+
+
+def test_realistic_grid_and_phrase_cues(tmp_path):
+    """House-style track with a beatless breakdown and a non-integer tempo."""
+    from app.analysis import analyze_file
+    from app.synth import make_realistic
+
+    p = str(tmp_path / "real.wav")
+    gt = make_realistic(p, "B", "minor", 123.7, offset=1.1)
+    r = analyze_file(p)
+    beat = 60 / 123.7
+    assert abs(r["bpm"] - 123.7) < 0.01
+    # first downbeat on the right beat of the bar, within 15 ms
+    assert abs(r["first_downbeat"] - gt["downbeat"]) < 0.015
+    # every section start (intro, build, breakdown, drop, outro) gets a cue
+    for b in gt["boundaries"]:
+        assert any(abs(c - b) < beat / 2 for c in r["cues"]), (b, r["cues"])
+    # grid stays on the beat to the end of the track
+    last = gt["boundaries"][-1] + 15 * 4 * beat
+    k = round((last - r["beat_offset"]) / (60 / r["bpm"]))
+    assert abs(r["beat_offset"] + k * 60 / r["bpm"] - last) < 0.015
+
+
+def test_grid_patch(client):
+    t = by_title(client)["Alpha"]
+    r = client.patch(f"/api/tracks/{t['id']}", json={"bpm": t["bpm"] * 2, "first_downbeat": 0.5, "cues": [3.0, 1.0, 2.0]}).json()
+    assert r["bpm"] == t["bpm"] * 2 and r["first_downbeat"] == 0.5 and r["cues"] == [1.0, 2.0, 3.0]
+    assert client.patch(f"/api/tracks/{t['id']}", json={"bpm": 500}).status_code == 400
+    client.patch(f"/api/tracks/{t['id']}", json={"bpm": t["bpm"], "first_downbeat": t["first_downbeat"], "cues": t["cues"]})

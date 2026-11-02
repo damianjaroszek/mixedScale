@@ -207,3 +207,7 @@ table.grid { width: 100%; border-collapse: collapse; }
   .sidebar { display: none; }
   body { overflow: auto; }
 }
+
+.nudge-group { display: inline-flex; gap: 2px; }
+.btn.nudge { width: 26px; padding: 6px 0; font-weight: 700; touch-action: none; user-select: none; }
+.btn.nudge.on { background: var(--deck); color: #0b0d12; }

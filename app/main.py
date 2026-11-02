@@ -169,6 +169,8 @@ class TrackPatch(BaseModel):
     rating: int | None = None
     key: str | None = None
     bpm: float | None = None
+    first_downbeat: float | None = None
+    beat_offset: float | None = None
     cues: list[float] | None = None
     write_file: bool = False
 
@@ -181,6 +183,10 @@ def patch_track(tid: int, p: TrackPatch):
         fields["key"] = fields["key"].upper()
         camelot.parse_camelot(fields["key"])
         fields["key_name"] = camelot.standard_name(fields["key"])
+    if "cues" in fields:
+        fields["cues"] = sorted(round(max(0.0, c), 3) for c in fields["cues"])[:8]
+    if "bpm" in fields and not 40 <= fields["bpm"] <= 250:
+        raise HTTPException(400, "BPM poza zakresem 40–250")
     if "rating" in fields:
         fields["rating"] = max(0, min(5, fields["rating"]))
     db.update("tracks", tid, fields)
@@ -264,7 +270,10 @@ def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac
     if not -12 <= semitones <= 12 or not 0.5 <= tempo <= 2.0:
         raise HTTPException(400, "Zakres zmiany tonacji/tempa poza limitem")
     src = _source_for(t, stem)
-    if semitones == 0 and abs(tempo - 1) < 1e-4 and Path(src).suffix.lower() in BROWSER_EXT and ext == ".flac":
+    # Only uncompressed/lossless files are served as-is. Everything else is decoded by ffmpeg, the same
+    # decoder the analysis uses, so cue points and the beat grid line up exactly with what you hear
+    # (browsers handle MP3/AAC encoder delay differently).
+    if semitones == 0 and abs(tempo - 1) < 1e-4 and Path(src).suffix.lower() in (".wav", ".flac") and ext == ".flac":
         return src
     rdir = CACHE / "render"
     rdir.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ export class Deck {
     this.playing = false;
     this.startCtx = 0;
     this.startBuf = 0;
+    this.rate = 1;
     this.pausedOrig = 0;
     this.loop = { on: false, beats: 16, start: 0, end: 0 };
     this.zoom = 0;
@@ -46,7 +47,18 @@ export class Deck {
       h("button", { class: "btn icon", title: "Oddal", onclick: (e) => { e.stopPropagation(); this.setZoom(this.zoom - 1); } }, "−"),
       h("button", { class: "btn icon", title: "Przybliż", onclick: (e) => { e.stopPropagation(); this.setZoom(this.zoom + 1); } }, "+"));
     this.waveBox = h("div", { class: "wave-box" }, this.canvas, this.emptyEl, zoom, this.busyEl);
-    this.waveBox.addEventListener("mousedown", (e) => this.onWaveClick(e));
+    this.waveBox.addEventListener("mousedown", (e) => { if (e.button === 0) this.onWaveClick(e); });
+    this.waveBox.addEventListener("contextmenu", (e) => {
+      if (!this.track) return;
+      e.preventDefault();
+      const rect = this.canvas.getBoundingClientRect();
+      const [v0, v1] = this.view();
+      const t = v0 + ((e.clientX - rect.left) / rect.width) * (v1 - v0);
+      const pxPerSec = rect.width / (v1 - v0);
+      this.cues().forEach((c, i) => { const d = (t - c) * pxPerSec; if (d >= -4 && d < 48) this.selCue = i; });
+      this.draw();
+      this.gridPopover(this.gridBtn);
+    });
     this.waveBox.addEventListener("wheel", (e) => { if (!this.track) return; e.preventDefault(); this.setZoom(this.zoom + (e.deltaY < 0 ? 1 : -1)); }, { passive: false });
 
     this.playBtn = h("button", { class: "play", title: "Odtwórz / pauza", onclick: () => this.toggle() }, "▶");
@@ -64,12 +76,23 @@ export class Deck {
     this.loopSize = h("button", { class: "btn", onclick: (e) => this.loopPopover(e.currentTarget) }, "16");
     this.syncBtn = h("button", { class: "btn" + (this.sync ? " on" : ""), title: "Dopasuj tempo do drugiego decku (bez zmiany tonacji)", onclick: () => this.toggleSync() }, "Sync");
     this.exportBtn = h("button", { class: "btn right", onclick: (e) => this.exportPopover(e.currentTarget) }, "⤓ Eksport");
+    this.gridBtn = h("button", { class: "btn", title: "Popraw siatkę beatów, BPM i cue pointy", onclick: (e) => this.gridPopover(e.currentTarget) }, "▦ Siatka");
+    const nudge = (label, r, title) => {
+      const b = h("button", { class: "btn nudge", title }, label);
+      const on = (e) => { e.preventDefault(); this.setRate(r); b.classList.add("on"); };
+      const off = () => { if (this.rate !== 1) this.setRate(1); b.classList.remove("on"); };
+      b.addEventListener("pointerdown", on);
+      ["pointerup", "pointerleave", "pointercancel"].forEach((ev) => b.addEventListener(ev, off));
+      return b;
+    };
+    this.nudgeEl = h("span", { class: "nudge-group", title: "Przytrzymaj, aby chwilowo zwolnić / przyspieszyć i dograć fazę na ucho" },
+      nudge("‹", 0.96, "Przytrzymaj: zwolnij"), nudge("›", 1.04, "Przytrzymaj: przyspiesz"));
 
     r.append(
       this.waveBox,
       h("div", { class: "deck-title" }, this.playBtn, this.nameEl, this.swapBtn),
       h("div", { class: "deck-info" }, this.keyEl, this.keyName, h("span", { class: "sep" }), this.bpmEl, h("span", { class: "sep" }), this.energyEl, this.timeEl),
-      h("div", { class: "deck-ctrl" }, this.keyBtn, this.stemBtn, h("span", { style: { display: "inline-flex" } }, this.loopBtn, this.loopSize), this.syncBtn, this.exportBtn),
+      h("div", { class: "deck-ctrl" }, this.keyBtn, this.stemBtn, h("span", { style: { display: "inline-flex" } }, this.loopBtn, this.loopSize), this.syncBtn, this.nudgeEl, this.gridBtn, this.exportBtn),
     );
     // drag & drop from library
     r.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("text/x-track")) { e.preventDefault(); r.classList.add("drop-target"); } });
@@ -160,10 +183,19 @@ export class Deck {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
       const buf = await ctx.decodeAudioData(await r.arrayBuffer());
       if (token !== this.loadToken) return;
-      this.buffer = buf;
-      this.bufTempo = tempo;
-      if (wasPlaying && this.playing) this.play(this.position());
-      else this.pausedOrig = pos;
+      if (wasPlaying && this.playing) {
+        // seamless swap: keep the musical position (and so the phase against the other deck)
+        const lead = 0.04;
+        const at = ctx.currentTime + lead;
+        const posAt = this.position() + lead * (this.bufTempo || 1) * this.rate; // measured on the OLD buffer
+        this.buffer = buf;
+        this.bufTempo = tempo;
+        this.play(posAt, at);
+      } else {
+        this.buffer = buf;
+        this.bufTempo = tempo;
+        this.pausedOrig = pos;
+      }
       this.setBusy("");
     } catch (err) {
       if (token === this.loadToken) { this.setBusy(""); toast(`Deck ${this.name}: ${err.message}`, { error: true }); }
@@ -178,8 +210,7 @@ export class Deck {
 
   position() {
     if (!this.playing || !this.buffer) return this.pausedOrig;
-    let b = this.startBuf + (ctx.currentTime - this.startCtx);
-    if (b < this.startBuf) return this.toOrig(this.startBuf); // scheduled in the future
+    let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate;
     if (this.source?.loop) {
       const ls = this.source.loopStart, le = this.source.loopEnd;
       if (b >= le && le > ls) b = ls + ((b - ls) % (le - ls));
@@ -187,16 +218,25 @@ export class Deck {
     return this.toOrig(Math.min(b, this.buffer.duration));
   }
 
+  // seconds of original track time per second of real time
+  get speed() { return (this.bufTempo || 1) * this.rate; }
+
   play(fromOrig = this.position(), when = 0) {
     if (!this.buffer) return;
     if (ctx.state === "suspended") ctx.resume();
-    this.killSource();
+    const at = Math.max(ctx.currentTime, when || ctx.currentTime);
+    const old = this.source;
+    if (old) { // let the old source run until the new one takes over (no gap, no double audio)
+      old.onended = null;
+      try { old.stop(at); } catch {}
+      setTimeout(() => old.disconnect(), (at - ctx.currentTime) * 1000 + 300);
+    }
     const src = ctx.createBufferSource();
     src.buffer = this.buffer;
+    src.playbackRate.value = this.rate;
     src.connect(this.out);
     const startB = Math.max(0, Math.min(this.toBuf(fromOrig), this.buffer.duration - 0.01));
     if (this.loop.on) this.applyLoop(src);
-    const at = Math.max(ctx.currentTime, when || ctx.currentTime);
     src.start(at, startB);
     src.onended = () => { if (this.source === src && !src.loop) { this.playing = false; this.pausedOrig = 0; this.updateInfo(); } };
     this.source = src;
@@ -204,6 +244,19 @@ export class Deck {
     this.startBuf = startB;
     this.playing = true;
     this.updateInfo();
+  }
+
+  // pitch-bend nudge: temporarily speed up / slow down to fix the phase by ear
+  setRate(r) {
+    if (this.playing && this.source) {
+      let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate;
+      const ls = this.source.loopStart, le = this.source.loopEnd;
+      if (this.source.loop && b >= le && le > ls) b = ls + ((b - ls) % (le - ls));
+      this.startBuf = b;
+      this.startCtx = Math.max(ctx.currentTime, this.startCtx);
+      this.source.playbackRate.setValueAtTime(r, ctx.currentTime);
+    }
+    this.rate = r;
   }
 
   killSource() {
@@ -240,8 +293,8 @@ export class Deck {
     const pos = p.position();
     const fd = p.track.first_downbeat || 0;
     let next = fd + Math.ceil((pos - fd) / bar + 1e-6) * bar;
-    let dt = (next - pos) / (p.bufTempo || 1);
-    if (dt < 0.06) dt += bar / (p.bufTempo || 1);
+    let dt = (next - pos) / p.speed;
+    if (dt < 0.06) dt += bar / p.speed;
     return ctx.currentTime + dt;
   }
 
@@ -436,6 +489,97 @@ export class Deck {
         } catch (err) { toast(err.message, { error: true }); }
       } }, "Eksportuj do folderu")),
     ], { align: "right" });
+  }
+
+  // ------------------------------------------------------------------ manual beat grid / cue editing
+  async saveGrid(fields, msg) {
+    const t = this.track;
+    try {
+      const fresh = await api.patch(`/api/tracks/${t.id}`, fields);
+      this.app.updateTrack(fresh);
+      this.track = { ...fresh };
+      if (this.computeSyncTempo()) await this.loadVariant();
+      const p = this.app.partner(this);
+      if (p.track) await p.refreshSync();
+      this.app.onDeckChange(this);
+      this.updateInfo();
+      if (msg) toast(msg);
+    } catch (err) { toast(err.message, { error: true }); }
+  }
+
+  // shift the whole grid (beats, downbeat and cues) by dt seconds
+  shiftGrid(dt) {
+    const t = this.track;
+    return this.saveGrid({
+      beat_offset: Math.max(0, (t.beat_offset || 0) + dt),
+      first_downbeat: Math.max(0, (t.first_downbeat || 0) + dt),
+      cues: (t.cues || []).map((c) => Math.max(0, c + dt)),
+    });
+  }
+
+  nearestBeat(pos) {
+    const b = this.beatLen(), off = this.track.beat_offset || 0;
+    return off + Math.round((pos - off) / b) * b;
+  }
+
+  gridPopover(anchor) {
+    if (!this.track) return;
+    const t = this.track;
+    const bpmIn = h("input", { class: "field", type: "number", step: "0.01", min: 40, max: 250, value: (+t.bpm).toFixed(2), style: { width: "90px" } });
+    const setBpm = (v) => { closePopover(); this.saveGrid({ bpm: Math.round(v * 1000) / 1000 }, `Deck ${this.name}: BPM ${(+v).toFixed(2)}`); };
+    const pos = () => this.position();
+    popover(anchor, [
+      h("h4", {}, "Tempo"),
+      h("div", { class: "pop-row" }, bpmIn,
+        h("button", { class: "btn", onclick: () => setBpm(+bpmIn.value) }, "Zapisz"),
+        h("button", { class: "btn", title: "Podwój (np. 87 → 174)", onclick: () => setBpm(t.bpm * 2) }, "×2"),
+        h("button", { class: "btn", title: "Połowa (np. 174 → 87)", onclick: () => setBpm(t.bpm / 2) }, "÷2")),
+      h("h4", { style: { marginTop: "12px" } }, "Siatka (zatrzymaj na uderzeniu stopy)"),
+      h("div", { class: "pop-row" },
+        h("button", { class: "btn", title: "Przesuń siatkę tak, by beat był dokładnie w miejscu głowicy", onclick: () => { closePopover(); this.shiftGrid(pos() - this.nearestBeat(pos())); } }, "Beat tutaj"),
+        h("button", { class: "btn", title: "Ten beat to „raz” — pierwszy beat taktu", onclick: () => {
+          closePopover();
+          const bar = 4 * this.beatLen();
+          const nb = this.nearestBeat(pos());
+          const fd = ((nb % bar) + bar) % bar;
+          this.saveGrid({ first_downbeat: fd, cues: (t.cues || []).map((c) => Math.max(0, fd + Math.round((c - fd) / bar) * bar)) }, "Pierwszy beat taktu ustawiony");
+        } }, "„Raz” tutaj"),
+        h("button", { class: "btn", title: "Siatka 5 ms wcześniej", onclick: () => this.shiftGrid(-0.005) }, "◀ 5 ms"),
+        h("button", { class: "btn", title: "Siatka 5 ms później", onclick: () => this.shiftGrid(0.005) }, "5 ms ▶")),
+      h("h4", { style: { marginTop: "12px" } }, "Cue pointy"),
+      h("div", { class: "pop-row" },
+        h("button", { class: "btn", title: "Dodaj cue w najbliższym beacie (C)", onclick: () => { closePopover(); this.addCueHere(); } }, "+ Cue tutaj"),
+        h("button", { class: "btn", title: `Przesuń Cue ${this.selCue + 1} w miejsce głowicy`, onclick: () => { closePopover(); this.moveCueHere(); } }, `Przesuń Cue ${this.selCue + 1} tutaj`),
+        h("button", { class: "btn danger", onclick: () => { closePopover(); this.deleteCue(this.selCue); } }, `Usuń Cue ${this.selCue + 1}`)),
+      h("p", { class: "muted", style: { fontSize: "11px", maxWidth: "330px", margin: "8px 0 0" } }, "Zmiany zapisują się w bibliotece. Prawy klik na etykiecie cue też otwiera to menu."),
+    ]);
+  }
+
+  addCueHere() {
+    const c = [...this.cues()];
+    const at = this.nearestBeat(this.position());
+    if (c.some((x) => Math.abs(x - at) < 0.05)) return;
+    if (c.length >= 8) { toast("Jest już 8 cue. Przesuń albo usuń któryś.", { error: true }); return; }
+    c.push(at); c.sort((a, b) => a - b);
+    this.selCue = c.indexOf(at);
+    this.saveGrid({ cues: c }, `Dodano Cue ${this.selCue + 1}`);
+  }
+
+  moveCueHere() {
+    const c = [...this.cues()];
+    if (!c.length) return this.addCueHere();
+    const at = this.nearestBeat(this.position());
+    c[this.selCue] = at; c.sort((a, b) => a - b);
+    this.selCue = c.indexOf(at);
+    this.saveGrid({ cues: c }, `Cue ${this.selCue + 1} przesunięty`);
+  }
+
+  deleteCue(i) {
+    const c = [...this.cues()];
+    if (i >= c.length) return;
+    c.splice(i, 1);
+    this.selCue = Math.max(0, Math.min(this.selCue, c.length - 1));
+    this.saveGrid({ cues: c }, "Cue usunięty");
   }
 
   setZoom(z) { this.zoom = Math.max(0, Math.min(ZOOM_BARS.length - 1, z)); this.draw(); }

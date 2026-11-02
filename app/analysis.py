@@ -99,8 +99,13 @@ def detect_tempo(y: np.ndarray, sr: int = SR) -> dict:
     # coarse then fine comb search around the estimate
     bpm, phase, _ = _comb_fit(env, fps, bpm0, 3.0, 0.1)
     bpm, phase, _ = _comb_fit(env, fps, bpm, 0.12, 0.005)
-    if abs(bpm - round(bpm)) < 0.06:
-        bpm = float(round(bpm))
+    # Most tracks are produced at an integer (or .5) BPM. Snap only when the grid fits at least
+    # as well there; a wrong snap would make synced decks drift over a few minutes.
+    _, _, fit_score = _comb_fit(env, fps, bpm, 0.0, 1.0)
+    for snapped in (round(bpm), round(bpm * 2) / 2):
+        if abs(snapped - bpm) < 0.05 and _comb_fit(env, fps, float(snapped), 0.0, 1.0)[2] >= fit_score * 0.998:
+            bpm = float(snapped)
+            break
     # phase from the low band (kick drum), so the grid does not lock onto off-beat hats
     mel = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=hop, n_mels=64, fmax=8000)
     mel_f = librosa.mel_frequencies(n_mels=64, fmax=8000)
@@ -122,11 +127,24 @@ def detect_tempo(y: np.ndarray, sr: int = SR) -> dict:
     beat_frames = beat_frames[beat_frames < len(nov)]
     # take max in a small window around each beat to tolerate grid jitter
     strength = np.array([nov[max(0, f - 2) : f + 3].max() for f in beat_frames]) if len(beat_frames) else np.zeros(4)
-    best = max(range(4), key=lambda k: strength[k::4].mean() if len(strength[k::4]) else 0)
+    # big changes (drops, breakdowns, new layers) land on the first beat of a bar
+    rms_b = np.array([low[max(0, f - 2) : f + 3].mean() for f in beat_frames]) if len(beat_frames) else np.zeros(4)
+    jump = np.zeros(len(rms_b))
+    for i in range(8, len(rms_b) - 8):
+        jump[i] = abs(np.log1p(rms_b[i : i + 8].mean()) - np.log1p(rms_b[i - 8 : i].mean()))
+    if jump.max() > 0:
+        jump /= jump.max()
+    big = jump * (jump > 0.3)
+
+    def phase_score(k):
+        sl = strength[k::4]
+        return (sl.mean() if len(sl) else 0) + 1.5 * big[k::4].sum() / max(1.0, big.sum())
+
+    best = max(range(4), key=phase_score)
     # onset envelopes peak about one hop after the attack
     first_downbeat = max(0.0, phase + best * period - hop / sr)
     phase = max(0.0, phase - hop / sr)
-    return {"bpm": round(bpm, 2), "beat_offset": round(float(phase), 4), "first_downbeat": round(float(first_downbeat), 4)}
+    return {"bpm": round(bpm, 3), "beat_offset": round(float(phase), 4), "first_downbeat": round(float(first_downbeat), 4)}
 
 
 def _energy_raw(db_active: float, onset_rate: float, centroid: float, bpm: float) -> float:
@@ -197,25 +215,25 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
     score = nov / (nov.max() + 1e-9) + jump
     # first musical bar = first bar louder than silence
     first_bar = int(np.argmax(bdb > (bdb.max() - 35))) if nb else 0
-    cands = [i for i in range(first_bar + 4, nb - 2) if (i - first_bar) % 4 == 0]
+    # phrase grid: DJ tracks are built from 8-bar phrases; find where they start
+    origin = max(range(8), key=lambda o: sum(sorted((score[i] for i in range(first_bar + o, nb, 8)), reverse=True)[:4]))
+    origin = first_bar + origin if origin < 8 else first_bar
+    on_phrase = lambda i: (i - origin) % 8 == 0
+    cands = [i for i in range(first_bar + 4, nb - 2) if on_phrase(i) or ((i - origin) % 4 == 0 and score[i] > 1.0)]
     cands.sort(key=lambda i: -score[i])
     chosen = [first_bar]
     for i in cands:
-        if len(chosen) >= 8:
-            break
-        if score[i] < 0.15:
+        if len(chosen) >= 8 or score[i] < 0.2:
             break
         if all(abs(i - c) >= 8 for c in chosen):
             chosen.append(i)
-    # fill remaining cues on a 16/32-bar grid
-    step = 32
-    while len(chosen) < 8 and step >= 8:
-        for i in range(first_bar + step, nb - 2, step):
+    # fill remaining cues on the 32/16/8-bar phrase grid
+    for step in (32, 16, 8):
+        for i in range(origin + step, nb - 2, step):
             if len(chosen) >= 8:
                 break
             if all(abs(i - c) >= step // 2 for c in chosen):
                 chosen.append(i)
-        step //= 2
     chosen = sorted(set(chosen))[:8]
     cues = [round(float(edges[i]), 3) for i in chosen]
 
