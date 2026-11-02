@@ -62,15 +62,19 @@ jobs:
         shell: pwsh
         run: |
           $env:BLENDORA_HOME = "$PWD\smoke-home"
+          # make sure the exe uses its own bundled ffmpeg, not the one on PATH
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*vendor*' -and $_ -notlike '*ffmpeg*' }) -join ';'
+          Get-ChildItem dist\Blendora -Recurse -Filter ffmpeg.exe | ForEach-Object { Write-Host "bundled: $($_.FullName)" }
           $p = Start-Process dist\Blendora\Blendora.exe -ArgumentList "--selftest" -Wait -PassThru
           Get-Content "$env:BLENDORA_HOME\blendora.log"
           if ($p.ExitCode -ne 0) { throw "selftest failed with exit code $($p.ExitCode)" }
+          if (-not ((Get-Content "$env:BLENDORA_HOME\blendora.log" -Raw) -match '_internal')) { throw "selftest did not use bundled ffmpeg" }
           $s = Start-Process dist\Blendora\Blendora.exe -ArgumentList "--server","--port","8799" -PassThru
           Start-Sleep 15
           $st = Invoke-RestMethod http://127.0.0.1:8799/api/status
           $html = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
           Stop-Process $s
-          if (-not $st.rubberband) { throw "bundled ffmpeg not used" }
+          if (-not $st.rubberband) { throw "bundled ffmpeg (with rubberband) not used" }
           if ($html.Content -notmatch "blendora") { throw "UI not served" }
           Write-Host "status OK, ffmpeg rubberband: $($st.rubberband)"
 

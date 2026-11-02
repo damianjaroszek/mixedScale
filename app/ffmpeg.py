@@ -27,7 +27,10 @@ def ffmpeg_bin() -> str:
     if env:
         return env
     exe = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
-    for cand in (os.path.join(app_dir(), exe), os.path.join(app_dir(), "ffmpeg", exe)):
+    dirs = [app_dir(), os.path.join(app_dir(), "ffmpeg")]
+    if hasattr(sys, "_MEIPASS"):  # PyInstaller puts bundled binaries in _internal
+        dirs.insert(0, sys._MEIPASS)
+    for cand in (os.path.join(d, exe) for d in dirs):
         if os.path.isfile(cand):
             return cand
     path = shutil.which("ffmpeg")
