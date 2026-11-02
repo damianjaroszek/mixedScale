@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blendora</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='12' cy='16' r='9' fill='%238b7bff'/><circle cx='20' cy='16' r='9' fill='%232de0a7' fill-opacity='.8'/></svg>">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><circle cx="12" cy="16" r="9" fill="var(--deck-a)"/><circle cx="20" cy="16" r="9" fill="var(--deck-b)" fill-opacity=".8"/></svg>
+    <span>blendora</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="library">Biblioteka</button>
+    <button class="tab" data-view="mashups">Zapisane mashupy</button>
+    <button class="tab" data-view="tags">Edytor tagów</button>
+    <button class="tab" data-view="settings">Ustawienia</button>
+  </nav>
+  <div class="top-right">
+    <span id="queueStatus" class="pill muted">Gotowe</span>
+    <button id="btnImport" class="btn primary">+ Dodaj muzykę</button>
+    <button id="btnHelp" class="btn icon" title="Skróty klawiszowe">?</button>
+  </div>
+</header>
+
+<section class="decks">
+  <div class="deck" id="deckA" data-deck="A"></div>
+  <div class="center" id="center">
+    <div class="seg" id="modeSeg">
+      <button data-mode="mashup" class="on">Mashup</button>
+      <button data-mode="mix">DJ Mix</button>
+    </div>
+    <div class="ideas-head">Pomysły dla decku A</div>
+    <div class="ideas-nav">
+      <button class="btn icon" id="ideaPrev" title="Poprzedni (←)">◀</button>
+      <span id="ideaCount">0 / 0</span>
+      <button class="btn icon accent" id="ideaNext" title="Następny (→)">▶</button>
+    </div>
+    <div class="idea-score" id="ideaScore"></div>
+    <button class="btn wide" id="btnFilter">Filtr pomysłów <span id="filterBadge" class="badge hidden"></span></button>
+    <button class="btn wide accent" id="btnTest">▶ Testuj mashup</button>
+    <button class="btn wide" id="btnSave">★ Zapisz mashup</button>
+    <div class="xfader">
+      <span>A</span><input type="range" id="xfader" min="0" max="1" step="0.01" value="0.5"><span>B</span>
+    </div>
+  </div>
+  <div class="deck" id="deckB" data-deck="B"></div>
+</section>
+
+<main class="bottom">
+  <aside class="sidebar">
+    <div class="side-head"><span>Playlisty</span><button class="btn icon" id="btnNewPl" title="Nowa playlista">+</button></div>
+    <ul id="plList" class="pl-list"></ul>
+    <div class="side-head wheel-head"><span>Koło Camelot</span></div>
+    <div id="wheel" class="wheel" title="Kliknij tonację, aby przefiltrować bibliotekę"></div>
+  </aside>
+  <section class="content">
+    <div class="view" id="view-library">
+      <div class="toolbar">
+        <span id="libTitle" class="lib-title">Wszystkie utwory</span>
+        <input id="search" type="search" placeholder="Szukaj: wykonawca, tytuł, gatunek…">
+        <button class="btn chip" id="fKey">Tonacja</button>
+        <button class="btn chip" id="fTempo">Tempo</button>
+        <button class="btn chip" id="fEnergy">Energia</button>
+        <button class="btn chip" id="fGenre">Gatunek</button>
+        <button class="btn chip" id="fMatch" title="Pokaż tylko utwory pasujące harmonicznie do decku A">Pasujące do A</button>
+        <span class="spacer"></span>
+        <span id="plTools" class="hidden">
+          <button class="btn" id="btnSortSet" title="Ułóż playlistę harmonicznie z krzywą energii">Ułóż set</button>
+          <button class="btn" id="btnM3u">M3U</button>
+        </span>
+        <button class="btn link" id="btnReset">Wyczyść filtry</button>
+      </div>
+      <div class="table-wrap">
+        <table class="grid" id="libTable">
+          <thead><tr>
+            <th class="c-cover"></th>
+            <th data-sort="artist">Wykonawca</th>
+            <th data-sort="title">Tytuł</th>
+            <th data-sort="key" class="c-key">Tonacja</th>
+            <th data-sort="bpm" class="c-num">Tempo</th>
+            <th data-sort="key_name" class="c-std">Zapis</th>
+            <th data-sort="energy" class="c-num">Energia</th>
+            <th data-sort="genre">Gatunek</th>
+            <th data-sort="comment">Komentarz</th>
+            <th data-sort="rating" class="c-rate">Ocena</th>
+            <th class="c-act"></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="libEmpty" class="empty hidden">
+          <h3>Twoja biblioteka jest pusta</h3>
+          <p>Przeciągnij pliki audio w to okno albo kliknij „Dodaj muzykę” i podaj folder z muzyką.</p>
+        </div>
+      </div>
+    </div>
+    <div class="view hidden" id="view-mashups"></div>
+    <div class="view hidden" id="view-tags"></div>
+    <div class="view hidden" id="view-settings"></div>
+  </section>
+</main>
+
+<div id="dropOverlay" class="drop-overlay hidden"><div>Upuść pliki, aby dodać je do biblioteki</div></div>
+<div id="toasts" class="toasts"></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

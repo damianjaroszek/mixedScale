@@ -1,0 +1,102 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pywebview pillow pytest httpx
+
+      - name: Download ffmpeg (with Rubber Band)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z -OutFile ffmpeg.7z
+          7z x ffmpeg.7z -offmpeg-dl | Out-Null
+          $exe = Get-ChildItem ffmpeg-dl -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          Copy-Item $exe.FullName vendor\ffmpeg.exe
+          $filters = & vendor\ffmpeg.exe -hide_banner -filters
+          if (-not ($filters -match ' rubberband ')) { throw "ffmpeg build has no rubberband filter" }
+          "BLENDORA_BUNDLE_FFMPEG=$PWD\vendor\ffmpeg.exe" >> $env:GITHUB_ENV
+          "$PWD\vendor" >> $env:GITHUB_PATH
+
+      - name: Tests
+        env:
+          PYTHONUTF8: "1"
+        run: python -m pytest -q tests
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (python -c "import app; print(app.__version__)").Trim()
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build exe (PyInstaller)
+        run: |
+          python packaging/make_icon.py
+          pyinstaller packaging/blendora.spec --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $env:BLENDORA_HOME = "$PWD\smoke-home"
+          $p = Start-Process dist\Blendora\Blendora.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:BLENDORA_HOME\blendora.log"
+          if ($p.ExitCode -ne 0) { throw "selftest failed with exit code $($p.ExitCode)" }
+          $s = Start-Process dist\Blendora\Blendora.exe -ArgumentList "--server","--port","8799" -PassThru
+          Start-Sleep 15
+          $st = Invoke-RestMethod http://127.0.0.1:8799/api/status
+          $html = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
+          Stop-Process $s
+          if (-not $st.rubberband) { throw "bundled ffmpeg not used" }
+          if ($html.Content -notmatch "blendora") { throw "UI not served" }
+          Write-Host "status OK, ffmpeg rubberband: $($st.rubberband)"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /DAppVersion=${{ steps.ver.outputs.version }} packaging\installer.iss
+          Compress-Archive -Path dist\Blendora -DestinationPath dist\Blendora-${{ steps.ver.outputs.version }}-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Blendora-Windows-${{ steps.ver.outputs.version }}
+          path: |
+            dist/Blendora-Setup-*.exe
+            dist/Blendora-*-portable.zip
+          retention-days: 30
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Blendora-Setup-*.exe
+            dist/Blendora-*-portable.zip
