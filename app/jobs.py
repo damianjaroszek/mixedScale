@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import traceback
@@ -52,40 +53,98 @@ def wave_path(track_id: int):
     return CACHE / "wave" / f"{track_id}.json"
 
 
+def analyze_job(path: str, learned: dict | None, bpm_range: tuple[float, float]) -> tuple[dict, dict]:
+    """Runs in a worker process: full analysis + waveform for one file."""
+    res = analysis.analyze_file(path, learned=learned, bpm_range=bpm_range)
+    wave = analysis.waveform(path)
+    return res, wave
+
+
+def worker_count(setting) -> int:
+    try:
+        n = int(setting or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        n = max(1, min((os.cpu_count() or 2) - 1, 8))
+    return n
+
+
+def parse_range(text: str) -> tuple[float, float]:
+    try:
+        lo, hi = (float(x) for x in str(text).replace("–", "-").split("-"))
+        if 40 <= lo < hi <= 250:
+            return lo, hi
+    except ValueError:
+        pass
+    return 78.0, 180.0
+
+
 class Analyzer(threading.Thread):
-    """Single worker thread that analyses tracks with status 'pending'."""
+    """Feeds tracks with status 'pending' to a pool of worker processes (all CPU cores)."""
 
     def __init__(self, db: DB):
         super().__init__(daemon=True)
         self.db = db
         self.wake = threading.Event()
-        self.current: int | None = None
+        self.running: dict[int, object] = {}
+        self.pool = None
+        self.pool_size = 0
+
+    @property
+    def current(self):
+        return next(iter(self.running), None)
 
     def kick(self):
         self.wake.set()
 
+    def _ensure_pool(self, n: int):
+        if self.pool is None or self.pool_size != n:
+            if self.pool is not None:
+                self.pool.shutdown(wait=True)
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor
+
+            self.pool = ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn"))
+            self.pool_size = n
+
     def run(self):
         while True:
-            row = self.db.one("SELECT * FROM tracks WHERE status = 'pending' ORDER BY id LIMIT 1")
-            if not row:
-                self.current = None
-                self.wake.wait(timeout=5)
-                self.wake.clear()
+            settings = self.db.settings()
+            n = worker_count(settings.get("analysis_workers"))
+            free = n - len(self.running)
+            rows = []
+            if free > 0:
+                ids = tuple(self.running) or (-1,)
+                rows = self.db.q(f"SELECT id, path FROM tracks WHERE status = 'pending' AND id NOT IN ({','.join('?' * len(ids))}) ORDER BY id LIMIT ?", (*ids, free))
+            if rows:
+                if not self.running:
+                    self._ensure_pool(n)
+                learned = settings.get("learned_profiles")
+                rng = parse_range(settings.get("bpm_range"))
+                for row in rows:
+                    self.db.update("tracks", row["id"], {"status": "analyzing", "error": None})
+                    try:
+                        fut = self.pool.submit(analyze_job, row["path"], learned, rng)
+                    except Exception:  # broken pool (e.g. a worker crashed): rebuild it
+                        self.pool = None
+                        self._ensure_pool(n)
+                        fut = self.pool.submit(analyze_job, row["path"], learned, rng)
+                    fut.add_done_callback(lambda f, r=row: self._done(r, f))
+                    self.running[row["id"]] = fut
                 continue
-            self.analyze(row)
+            self.wake.wait(timeout=2 if self.running else 5)
+            self.wake.clear()
 
-    def analyze(self, row: dict):
+    def _done(self, row: dict, fut):
         tid = row["id"]
-        self.current = tid
-        self.db.update("tracks", tid, {"status": "analyzing", "error": None})
         try:
-            res = analysis.analyze_file(row["path"])
-            wave = analysis.waveform(row["path"])
+            res, wave = fut.result()
             wp = wave_path(tid)
             wp.parent.mkdir(parents=True, exist_ok=True)
             wp.write_text(json.dumps(wave))
-            fields = {k: res[k] for k in ("duration", "key", "key_name", "key_confidence", "bpm", "beat_offset", "first_downbeat", "energy", "cues", "segments")}
-            fields.update(status="done", analyzed_at=time.time())
+            fields = {k: res[k] for k in ("duration", "key", "key_name", "key_confidence", "key2", "key_features", "bpm", "beat_offset", "first_downbeat", "energy", "cues", "segments")}
+            fields.update(status="done", analyzed_at=time.time(), key_manual=0)
             self.db.update("tracks", tid, fields)
             settings = self.db.settings()
             if settings.get("write_tags_after_analysis"):
@@ -97,9 +156,10 @@ class Analyzer(threading.Thread):
                     traceback.print_exc()
         except Exception as exc:
             traceback.print_exc()
-            self.db.update("tracks", tid, {"status": "error", "error": str(exc)[:500]})
+            self.db.update("tracks", tid, {"status": "error", "error": str(exc)[:500] or exc.__class__.__name__})
         finally:
-            self.current = None
+            self.running.pop(tid, None)
+            self.wake.set()
 
 
 def run_stems(db: DB, track_id: int, progress=None) -> dict:

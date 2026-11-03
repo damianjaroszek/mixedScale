@@ -175,3 +175,34 @@ def test_grid_patch(client):
     assert r["bpm"] == t["bpm"] * 2 and r["first_downbeat"] == 0.5 and r["cues"] == [1.0, 2.0, 3.0]
     assert client.patch(f"/api/tracks/{t['id']}", json={"bpm": 500}).status_code == 400
     client.patch(f"/api/tracks/{t['id']}", json={"bpm": t["bpm"], "first_downbeat": t["first_downbeat"], "cues": t["cues"]})
+
+
+def test_tag_key_parsing():
+    from app.camelot import parse_any
+
+    cases = {"8A": "8A", "08A - Energy 6": "8A", "Am": "8A", "A minor": "8A", "F#m": "11A", "Ebmin": "2A", "C": "8B", "Bbmaj": "6B", "Gm": "6A", "nonsense": None}
+    for text, code in cases.items():
+        assert parse_any(text) == code, text
+
+
+def test_keycheck_and_learning(tmp_path):
+    """Profiles learned from tagged tracks are cross-validated and only applied when they help."""
+    from app.analysis import key_from_features, learn_profiles
+
+    rng = __import__("numpy").random.default_rng(0)
+    from app import camelot
+
+    # synthetic features: tonic-aligned chroma with a library-specific bias
+    items = []
+    for i in range(60):
+        mode = "minor" if i % 2 else "major"
+        pc = i % 12
+        base = [1.0, 0.1, 0.5, 0.9 if mode == "minor" else 0.15, 0.2 if mode == "minor" else 0.9, 0.6, 0.1, 0.95, 0.6 if mode == "minor" else 0.2, 0.3, 0.5 if mode == "minor" else 0.2, 0.3 if mode == "minor" else 0.4]
+        chroma = __import__("numpy").roll(__import__("numpy").array(base) + rng.uniform(0, 0.15, 12), pc)
+        items.append(({"chroma": chroma.tolist(), "bass": chroma.tolist(), "chords": []}, camelot.to_camelot(pc, mode)))
+    prof = learn_profiles(items)
+    assert prof is not None
+    acc = sum(key_from_features(f, prof)["key"] == k for f, k in items) / len(items)
+    assert acc > 0.9
+    r = key_from_features(items[0][0])
+    assert set(r) >= {"key", "key2", "key_confidence"} and r["key"] != r["key2"]

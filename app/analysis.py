@@ -36,32 +36,113 @@ def _zcorr(a: np.ndarray, b: np.ndarray) -> float:
     return float((a * b).mean())
 
 
-def detect_key(y: np.ndarray, sr: int = SR) -> dict:
+TRIADS = {}
+for _r in range(12):
+    for _q, _iv in (("M", (0, 4, 7)), ("m", (0, 3, 7))):
+        _v = np.zeros(12)
+        _v[[(_r + i) % 12 for i in _iv]] = 1
+        TRIADS[(_r, _q)] = _v
+# weight of a chord (degree above the tonic, quality) as evidence for a key
+CHORD_FUNC = {
+    "major": {(0, "M"): 1.0, (5, "M"): 0.55, (7, "M"): 0.6, (9, "m"): 0.35, (2, "m"): 0.3, (4, "m"): 0.25},
+    "minor": {(0, "m"): 1.0, (5, "m"): 0.55, (7, "m"): 0.45, (7, "M"): 0.55, (8, "M"): 0.35, (3, "M"): 0.3, (10, "M"): 0.35},
+}
+CHORD_WEIGHT = 2.0
+BASS_WEIGHT = 0.15
+
+
+def key_features(y: np.ndarray, bpm: float, first_downbeat: float, sr: int = SR) -> dict:
+    """Compact harmonic description of a track, stored so keys can be re-scored without re-analysis."""
     harm = librosa.effects.harmonic(y, margin=2.0)
-    chroma = librosa.feature.chroma_cqt(y=harm, sr=sr, hop_length=HOP * 2, fmin=librosa.note_to_hz("C2"), n_octaves=6, bins_per_octave=36)
-    # weight frames by their harmonic energy so silent/noisy parts count less
-    rms = librosa.feature.rms(y=harm, hop_length=HOP * 2)[0][: chroma.shape[1]]
+    C = librosa.feature.chroma_cqt(y=harm, sr=sr, hop_length=HOP, fmin=librosa.note_to_hz("C2"), n_octaves=6, bins_per_octave=36, tuning=0.0)
+    B = librosa.feature.chroma_cqt(y=harm, sr=sr, hop_length=HOP, fmin=librosa.note_to_hz("C1"), n_octaves=2, bins_per_octave=36, tuning=0.0)
+    rms = librosa.feature.rms(y=harm, hop_length=HOP)[0]
+    n = min(C.shape[1], B.shape[1], len(rms))
+    C, B, rms = C[:, :n], B[:, :n], rms[:n]
     w = rms / (rms.max() + 1e-9)
-    profile = (np.log1p(10 * chroma) * w).sum(axis=1)
-    # bass chroma helps separate relative major/minor (the tonic sits in the bass most often)
-    bass = librosa.feature.chroma_cqt(y=harm, sr=sr, hop_length=HOP * 2, fmin=librosa.note_to_hz("C1"), n_octaves=2, bins_per_octave=36)
-    bass_prof = (bass[:, : len(w)] * w[: bass.shape[1]]).sum(axis=1)
-    bass_prof = bass_prof / (bass_prof.max() + 1e-9)
-    scores = np.zeros((2, 12))
-    for maj, minr in PROFILES.values():
+    times = librosa.frames_to_time(np.arange(n), sr=sr, hop_length=HOP)
+    bar = 240.0 / bpm
+    start = first_downbeat
+    while start - bar >= 0:
+        start -= bar
+    chords, energy = [], []
+    for a in np.arange(start, times[-1] - bar / 2, bar):
+        m = (times >= a) & (times < a + bar)
+        if m.sum() < 2:
+            continue
+        c, b = C[:, m].mean(axis=1), B[:, m].mean(axis=1)
+        best = max(TRIADS, key=lambda k: _zcorr(c, TRIADS[k]) + 0.3 * b[k[0]] / (b.max() + 1e-9))
+        chords.append(f"{best[0]}{best[1]}")
+        energy.append(round(float(rms[m].mean()), 5))
+    return {
+        "chroma": [round(float(v), 4) for v in (C * w).sum(axis=1)],
+        "bass": [round(float(v), 4) for v in (B * w).sum(axis=1)],
+        "chords": chords,
+        "bar_energy": energy,
+    }
+
+
+def key_scores(f: dict, learned: dict | None = None) -> np.ndarray:
+    """2x12 score matrix (major/minor x tonic pitch class)."""
+    chroma, bass = np.array(f["chroma"]), np.array(f["bass"])
+    profs = [PROFILES["shaath"]]
+    if learned:
+        profs = profs + [(learned["major"], learned["minor"])] * 2  # trust the user's own library more
+    s = np.zeros((2, 12))
+    for maj, minr in profs:
         maj, minr = np.array(maj), np.array(minr)
         for pc in range(12):
-            scores[0, pc] += _zcorr(profile, np.roll(maj, pc))
-            scores[1, pc] += _zcorr(profile, np.roll(minr, pc))
-    scores /= len(PROFILES)
-    for pc in range(12):
-        scores[:, pc] += 0.25 * (bass_prof[pc] - bass_prof.mean())
-    mode_i, pc = np.unravel_index(np.argmax(scores), scores.shape)
-    mode = "major" if mode_i == 0 else "minor"
-    flat = np.sort(scores.ravel())
-    confidence = float(np.clip((flat[-1] - flat[-2]) * 10, 0, 1))
-    code = camelot.to_camelot(int(pc), mode)
-    return {"key": code, "key_name": camelot.standard_name(code), "key_confidence": round(confidence, 3)}
+            s[0, pc] += _zcorr(chroma, np.roll(maj, pc))
+            s[1, pc] += _zcorr(chroma, np.roll(minr, pc))
+    s /= len(profs)
+    bp = bass / (bass.max() + 1e-9)
+    s += BASS_WEIGHT * (bp - bp.mean())[None, :]
+    # chord evidence: which key explains the bar-by-bar chords best (tonic on phrase starts counts more)
+    ch = [(int(c[:-1]), c[-1]) for c in f.get("chords", [])]
+    if ch:
+        be = np.array(f.get("bar_energy") or [1.0] * len(ch))
+        be = be / (be.max() + 1e-9)
+        cs = np.zeros((2, 12))
+        for mi, mode in enumerate(("major", "minor")):
+            func = CHORD_FUNC[mode]
+            for pc in range(12):
+                tot = 0.0
+                for i, (r, q) in enumerate(ch):
+                    v = func.get(((r - pc) % 12, q), -0.4)
+                    if v == 1.0 and i % 4 == 0:
+                        v = 1.5
+                    elif v == 1.0 and i % 4 == 3:
+                        v = 1.2
+                    tot += v * be[i]
+                cs[mi, pc] = tot / max(1e-9, be.sum())
+        s += CHORD_WEIGHT * cs
+    return s
+
+
+def key_from_features(f: dict, learned: dict | None = None) -> dict:
+    s = key_scores(f, learned)
+    order = np.argsort(s.ravel())[::-1]
+    codes = []
+    for idx in order[:2]:
+        mode_i, pc = divmod(int(idx), 12)
+        codes.append(camelot.to_camelot(pc, "major" if mode_i == 0 else "minor"))
+    flat = s.ravel()[order]
+    spread = flat[0] - np.median(flat)
+    confidence = float(np.clip((flat[0] - flat[1]) / (spread + 1e-9) * 2.5, 0, 1))
+    return {"key": codes[0], "key_name": camelot.standard_name(codes[0]), "key_confidence": round(confidence, 3), "key2": codes[1]}
+
+
+def learn_profiles(items: list[tuple[dict, str]]) -> dict | None:
+    """Average tonic-aligned chroma per mode from tracks whose key the user trusts (e.g. MIK tags)."""
+    acc = {"major": [], "minor": []}
+    for f, code in items:
+        pc, mode = camelot.camelot_to_pitch(code)
+        v = np.roll(np.array(f["chroma"], dtype=float), -pc)
+        v = (v - v.mean()) / (v.std() + 1e-9)
+        acc[mode].append(v)
+    if len(acc["major"]) < 5 or len(acc["minor"]) < 5:
+        return None
+    return {m: [round(float(x), 4) for x in np.mean(acc[m], axis=0)] for m in acc}
 
 
 def _fold_bpm(bpm: float, lo: float = 78.0, hi: float = 180.0) -> float:
@@ -89,13 +170,13 @@ def _comb_fit(env: np.ndarray, fps: float, bpm0: float, span: float, step: float
     return best
 
 
-def detect_tempo(y: np.ndarray, sr: int = SR) -> dict:
+def detect_tempo(y: np.ndarray, sr: int = SR, bpm_range: tuple[float, float] = (78.0, 180.0)) -> dict:
     hop = 256
     fps = sr / hop
     env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop, aggregate=np.median)
     env = env / (env.max() + 1e-9)
     tempo = librosa.feature.tempo(onset_envelope=env, sr=sr, hop_length=hop, start_bpm=124, max_tempo=200)
-    bpm0 = _fold_bpm(float(np.atleast_1d(tempo)[0]))
+    bpm0 = _fold_bpm(float(np.atleast_1d(tempo)[0]), *bpm_range)
     # coarse then fine comb search around the estimate
     bpm, phase, _ = _comb_fit(env, fps, bpm0, 3.0, 0.1)
     bpm, phase, _ = _comb_fit(env, fps, bpm, 0.12, 0.005)
@@ -270,7 +351,7 @@ def waveform(path: str, duration_hint: float | None = None) -> dict:
     return out
 
 
-def analyze_file(path: str) -> dict:
+def analyze_file(path: str, learned: dict | None = None, bpm_range: tuple[float, float] = (78.0, 180.0)) -> dict:
     y = decode(path, sr=SR, mono=True)
     if len(y) < SR * 5:
         raise ValueError("Plik jest za krótki (min. 5 s).")
@@ -278,7 +359,8 @@ def analyze_file(path: str) -> dict:
     # Key detection on up to ~8 minutes from the middle for speed
     max_len = SR * 480
     yk = y if len(y) <= max_len else y[(len(y) - max_len) // 2 : (len(y) + max_len) // 2]
-    key = detect_key(yk)
-    tempo = detect_tempo(y)
+    tempo = detect_tempo(y, bpm_range=bpm_range)
+    feats = key_features(yk, tempo["bpm"], tempo["first_downbeat"] - (len(y) - len(yk)) / 2 / SR)
+    key = key_from_features(feats, learned)
     struct = analyze_structure(y, tempo["bpm"], tempo["first_downbeat"])
-    return {"duration": round(dur, 3), **key, **tempo, **struct}
+    return {"duration": round(dur, 3), **key, **tempo, **struct, "key_features": feats}

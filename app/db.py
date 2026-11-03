@@ -53,9 +53,19 @@ DEFAULT_SETTINGS = {
     "write_tags_after_analysis": False,
     "comment_template": "{key} - Energy {energy}",
     "stem_model": "htdemucs",
+    "analysis_workers": 0,          # 0 = automatic (CPU cores - 1)
+    "bpm_range": "78-180",          # tempo is folded into this range (e.g. "88-176" for drum & bass)
+    "learned_profiles": None,       # key profiles learned from the user's tagged library
 }
 
-JSON_FIELDS = ("cues", "segments")
+JSON_FIELDS = ("cues", "segments", "key_features")
+
+MIGRATIONS = [
+    "ALTER TABLE tracks ADD COLUMN key2 TEXT",
+    "ALTER TABLE tracks ADD COLUMN key_features TEXT",
+    "ALTER TABLE tracks ADD COLUMN tag_key TEXT",
+    "ALTER TABLE tracks ADD COLUMN key_manual INTEGER DEFAULT 0",
+]
 
 
 class DB:
@@ -69,6 +79,10 @@ class DB:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tracks)")}
+        for m in MIGRATIONS:
+            if m.split("ADD COLUMN ")[1].split()[0] not in cols:
+                self.conn.execute(m)
         # analyses interrupted by a crash/restart go back to the queue
         self.conn.execute("UPDATE tracks SET status='pending' WHERE status='analyzing'")
         self.conn.commit()

@@ -131,13 +131,16 @@ export function renderSettings(app) {
     export_format: h("select", { class: "field" }, ["wav", "flac", "mp3"].map((x) => h("option", { value: x, selected: x === s.export_format }, x.toUpperCase()))),
     write_tags_after_analysis: h("input", { type: "checkbox", checked: !!s.write_tags_after_analysis }),
     comment_template: h("input", { class: "field", value: s.comment_template }),
+    analysis_workers: h("select", { class: "field" }, [[0, "Automatycznie (rdzenie − 1)"], [1, "1"], [2, "2"], [4, "4"], [6, "6"], [8, "8"]].map(([v, l]) => h("option", { value: v, selected: +s.analysis_workers === v }, l))),
+    bpm_range: h("select", { class: "field" }, [["78-180", "78–180 (domyślnie)"], ["88-176", "88–176 (drum & bass jako 174)"], ["70-140", "70–140 (hip-hop, downtempo)"], ["100-200", "100–200 (hardcore, techno)"]].map(([v, l]) => h("option", { value: v, selected: s.bpm_range === v }, l))),
     stem_model: h("select", { class: "field" }, [["htdemucs", "htdemucs (szybszy)"], ["htdemucs_ft", "htdemucs_ft (najlepsza jakość, 4× wolniej)"], ["mdx_extra", "mdx_extra"]].map(([v, l]) => h("option", { value: v, selected: v === s.stem_model }, l))),
   };
   const save = h("button", { class: "btn primary", onclick: async () => {
     const vals = {};
     for (const [k, el] of Object.entries(f)) vals[k] = el.type === "checkbox" ? el.checked : el.value;
+    vals.analysis_workers = +vals.analysis_workers;
     app.settings = await api.put("/api/settings", vals);
-    app.library.render();
+    await app.refresh();
     toast("Ustawienia zapisane");
   } }, "Zapisz ustawienia");
   const row = (label, el, hint) => [h("label", {}, label), el, hint ? h("div", { class: "hint" }, hint) : null];
@@ -149,6 +152,8 @@ export function renderSettings(app) {
       row("Wpisuj tonację do tagów po analizie", f.write_tags_after_analysis, "Zapisuje TKEY/BPM i komentarz według wzoru poniżej."),
       row("Wzór komentarza", f.comment_template, "Dostępne pola: {key}, {energy}, {bpm}"),
       row("Model separacji stemów", f.stem_model),
+      row("Równoległe analizy", f.analysis_workers, "Więcej = szybciej, ale większe obciążenie komputera."),
+      row("Zakres tempa", f.bpm_range, "Tempo jest podwajane / dzielone na pół, żeby trafić w ten zakres. Zmiana działa od razu, bez ponownej analizy."),
       h("span"), h("div", {}, save)),
     h("h3", {}, "Silniki"),
     h("div", { class: "settings-grid" },

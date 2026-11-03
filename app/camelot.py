@@ -93,3 +93,27 @@ def best_shift(a: str, b: str, max_shift: int = 4) -> tuple[int, str, float] | N
         if best is None or score > best[2] + 1e-9:
             best = (s, r[0], score)
     return best
+
+
+_NOTE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+
+def parse_any(text: str | None) -> str | None:
+    """Read a key written by other software: '8A', '08A', 'Am', 'A minor', 'F#m', 'Ebmin', 'C', '8A - Energy 6'."""
+    import re
+
+    if not text:
+        return None
+    t = text.strip()
+    m = re.match(r"^\s*0?(1[0-2]|[1-9])\s*([ABab])\b", t)
+    if m:
+        return f"{int(m.group(1))}{m.group(2).upper()}"
+    m = re.match(r"^\s*([A-Ga-g])\s*([#♯b♭]?)\s*(m(?:in(?:or)?)?|maj(?:or)?|minor|major|M)?\s*$", t)
+    if not m:
+        return None
+    pc = _NOTE[m.group(1).upper()]
+    acc = m.group(2)
+    pc += 1 if acc in ("#", "♯") else -1 if acc in ("b", "♭") else 0
+    q = m.group(3) or ""
+    minor = q.lower().startswith("m") and not q.lower().startswith("maj") and q != "M"
+    return to_camelot(pc % 12, "minor" if minor else "major")

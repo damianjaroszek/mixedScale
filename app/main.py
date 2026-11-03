@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import camelot, ffmpeg, mashup, stems, tags
+from . import analysis, camelot, ffmpeg, mashup, stems, tags
 from .db import CACHE, HOME, IMPORTED, DB
 from .jobs import Analyzer, Jobs, run_stems, wave_path
 
@@ -71,6 +71,7 @@ def status():
         "home": str(HOME),
         "counts": counts,
         "analyzing": analyzer.current,
+        "workers": len(analyzer.running),
         "rubberband": ffmpeg.has_rubberband(),
         "demucs": stems.demucs_available(),
         "jobs": jobs.active(),
@@ -84,7 +85,116 @@ def get_settings():
 
 @app.put("/api/settings")
 def put_settings(values: dict):
-    return db.set_settings(values)
+    old = db.settings()
+    new = db.set_settings({k: v for k, v in values.items() if k != "learned_profiles"})
+    if new.get("bpm_range") != old.get("bpm_range"):
+        refold_tempos()
+    analyzer.kick()
+    return new
+
+
+def refold_tempos() -> int:
+    """Apply the tempo range to analysed tracks (x2 / /2) without re-analysing them."""
+    from .jobs import parse_range
+
+    lo, hi = parse_range(db.settings().get("bpm_range"))
+    n = 0
+    for t in db.q("SELECT id, bpm FROM tracks WHERE status = 'done' AND bpm IS NOT NULL"):
+        b = t["bpm"]
+        while b < lo:
+            b *= 2
+        while b >= hi:
+            b /= 2
+        if abs(b - t["bpm"]) > 1e-6:
+            db.update("tracks", t["id"], {"bpm": round(b, 3)})
+            n += 1
+    return n
+
+
+# ---------------------------------------------------------------- key check against tags (e.g. Mixed In Key)
+def _relation(a: str, b: str) -> str:
+    if a == b:
+        return "same"
+    pa, ma = camelot.camelot_to_pitch(a)
+    pb, mb = camelot.camelot_to_pitch(b)
+    na, la = camelot.parse_camelot(a)
+    nb, lb = camelot.parse_camelot(b)
+    if na == nb:
+        return "relative"
+    if la == lb and (na - nb) % 12 in (1, 11):
+        return "fifth"
+    if pa == pb:
+        return "parallel"
+    return "other"
+
+
+@app.get("/api/keycheck")
+def keycheck():
+    rows = db.q("SELECT id, artist, title, key, key2, key_confidence, tag_key, key_manual FROM tracks WHERE status = 'done' AND tag_key IS NOT NULL AND key IS NOT NULL")
+    counts = {"same": 0, "relative": 0, "fifth": 0, "parallel": 0, "other": 0}
+    diffs = []
+    for r in rows:
+        rel = _relation(r["key"], r["tag_key"])
+        counts[rel] += 1
+        if rel != "same":
+            diffs.append({**r, "relation": rel})
+    diffs.sort(key=lambda d: (d["relation"] == "relative", -(d["key_confidence"] or 0)))
+    missing = db.one("SELECT COUNT(*) n FROM tracks WHERE status = 'done' AND key_features IS NULL")["n"]
+    return {"total": len(rows), "counts": counts, "diffs": diffs[:300], "learned": bool(db.settings().get("learned_profiles")), "need_reanalysis": missing}
+
+
+def _rescore_all(learned: dict | None) -> int:
+    n = 0
+    for t in db.q("SELECT id, key_features, key FROM tracks WHERE status = 'done' AND key_features IS NOT NULL AND COALESCE(key_manual, 0) = 0"):
+        k = analysis.key_from_features(t["key_features"], learned)
+        if k["key"] != t["key"]:
+            n += 1
+        db.update("tracks", t["id"], k)
+    return n
+
+
+@app.post("/api/keycheck/learn")
+def keycheck_learn():
+    """Learn key profiles from tracks whose tag key (e.g. from Mixed In Key) we trust, then re-score."""
+    items = [(t["key_features"], t["tag_key"]) for t in db.q("SELECT key_features, tag_key FROM tracks WHERE key_features IS NOT NULL AND tag_key IS NOT NULL")]
+    if len(items) < 20:
+        raise HTTPException(400, f"Za mało utworów z tonacją w tagach i nową analizą ({len(items)}). Potrzeba co najmniej 20.")
+    # honest estimate: 5-fold cross-validation, profiles never see the track they score
+    import random
+
+    random.Random(0).shuffle(items)
+    folds = [items[i::5] for i in range(5)]
+    before = after = 0
+    for i, test in enumerate(folds):
+        train = [x for j, f in enumerate(folds) if j != i for x in f]
+        prof = analysis.learn_profiles(train)
+        for f, code in test:
+            before += analysis.key_from_features(f)["key"] == code
+            after += analysis.key_from_features(f, prof)["key"] == code
+    prof = analysis.learn_profiles(items)
+    if not prof:
+        raise HTTPException(400, "Potrzeba co najmniej 5 utworów durowych i 5 molowych z tonacją w tagach.")
+    if after < before:
+        return {"applied": False, "before": before / len(items), "after": after / len(items), "changed": 0}
+    db.set_settings({"learned_profiles": prof})
+    changed = _rescore_all(prof)
+    return {"applied": True, "before": before / len(items), "after": after / len(items), "changed": changed}
+
+
+@app.post("/api/keycheck/reset")
+def keycheck_reset():
+    db.set_settings({"learned_profiles": None})
+    return {"changed": _rescore_all(None)}
+
+
+@app.post("/api/tracks/rescan-tags")
+def rescan_tag_keys():
+    n = 0
+    for t in db.q("SELECT id, path, comment FROM tracks"):
+        k = tags.read_tag_key(t["path"], t["comment"] or "")
+        db.update("tracks", t["id"], {"tag_key": k})
+        n += bool(k)
+    return {"with_key": n}
 
 
 @app.get("/api/camelot")
@@ -146,7 +256,7 @@ async def import_upload(files: list[UploadFile] = File(...)):
 
 
 # ---------------------------------------------------------------- tracks
-TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
+TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, key2, tag_key, key_manual, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
 
 
 @app.get("/api/tracks")
@@ -183,6 +293,7 @@ def patch_track(tid: int, p: TrackPatch):
         fields["key"] = fields["key"].upper()
         camelot.parse_camelot(fields["key"])
         fields["key_name"] = camelot.standard_name(fields["key"])
+        fields["key_manual"] = 1
     if "cues" in fields:
         fields["cues"] = sorted(round(max(0.0, c), 3) for c in fields["cues"])[:8]
     if "bpm" in fields and not 40 <= fields["bpm"] <= 250:

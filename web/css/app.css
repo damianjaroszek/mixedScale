@@ -228,3 +228,14 @@ table.grid { width: 100%; border-collapse: collapse; }
 .pad.lab-break span, .pad.lab-intro span, .pad.lab-outro span { color: var(--muted); }
 .pad.empty { align-items: center; justify-content: center; color: var(--dim); font-size: 16px; border-style: dashed; }
 @media (max-width: 1100px) { .pad small { display: none; } }
+
+.key-cell { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+.key.unsure { outline: 1px dashed rgba(255,255,255,.7); outline-offset: 1px; }
+.key-cell .q { color: var(--warn); font-weight: 700; font-size: 11px; }
+.key-cell .tagdiff { color: var(--danger); font-weight: 700; font-size: 12px; }
+.stat-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 14px; }
+.stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 120px; }
+.stat b { display: block; font-size: 22px; }
+.stat span { color: var(--muted); font-size: 12px; }
+.conf { display: inline-block; width: 44px; height: 5px; background: var(--panel-3); border-radius: 999px; overflow: hidden; vertical-align: middle; }
+.conf > i { display: block; height: 100%; background: var(--accent); }

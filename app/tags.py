@@ -43,6 +43,7 @@ def read_tags(path: str) -> dict:
                 out["comment"] = str(full.tags["comment"][0])
     except Exception:
         pass
+    out["tag_key"] = read_tag_key(path, out.get("comment", ""))
     guess = _guess_from_name(path)
     if not out["title"]:
         out["title"] = guess["title"]
@@ -115,3 +116,25 @@ def write_tags(path: str, values: dict, key: str | None = None, bpm: float | Non
     except Exception:
         pass  # some easy-tag backends (e.g. MP4/WAV) don't support every field
     f.save()
+
+
+def read_tag_key(path: str, comment: str = "") -> str | None:
+    """Key stored by other DJ software (Mixed In Key, Rekordbox, Traktor...), as Camelot."""
+    from .camelot import parse_any
+
+    try:
+        f = mutagen.File(path)
+        tags = f.tags if f is not None else None
+        if tags is not None:
+            for k in ("TKEY", "initialkey", "INITIALKEY", "----:com.apple.iTunes:initialkey", "KEY"):
+                if k in tags:
+                    v = tags[k]
+                    v = v.text[0] if hasattr(v, "text") else v[0] if isinstance(v, list) else v
+                    if isinstance(v, bytes):
+                        v = v.decode(errors="ignore")
+                    code = parse_any(str(v))
+                    if code:
+                        return code
+    except Exception:
+        pass
+    return parse_any(comment.split("-")[0]) if comment else None

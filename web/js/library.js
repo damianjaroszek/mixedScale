@@ -152,7 +152,12 @@ export class Library {
       ? h("img", { class: "cover", loading: "lazy", src: `/api/tracks/${t.id}/cover`, alt: "" })
       : h("div", { class: "cover ph", style: { background: `linear-gradient(135deg, ${keyColor(t.key)}, #20263a)` } }, t.key || "");
     let keyCell;
-    if (t.status === "done") keyCell = keyBadge(t.key);
+    if (t.status === "done") {
+      const low = t.key_confidence != null && t.key_confidence < 0.35 && !t.key_manual;
+      const differs = t.tag_key && t.tag_key !== t.key;
+      keyCell = h("span", { class: "key-cell", "data-key": "1", title: `Pewność ${Math.round((t.key_confidence || 0) * 100)}%${t.key2 ? `, alternatywa ${t.key2}` : ""}${t.tag_key ? `, w tagach ${t.tag_key}` : ""}. Kliknij, aby zmienić.` },
+        keyBadge(t.key, low ? "unsure" : ""), low ? h("span", { class: "q" }, "?") : null, differs ? h("span", { class: "tagdiff" }, "≠") : null);
+    }
     else if (t.status === "error") keyCell = h("span", { class: "status-chip err", title: t.error || "" }, "błąd");
     else keyCell = h("span", { class: "status-chip" }, t.status === "analyzing" ? "analiza…" : "w kolejce");
     const stars = h("span", { class: "stars" }, [1, 2, 3, 4, 5].map((n) => h("i", { class: n <= (t.rating || 0) ? "on" : "", "data-r": n })));
@@ -188,6 +193,7 @@ export class Library {
       return;
     }
     if (e.target.closest(".act")) { this.menu(e.target.closest(".act"), id); return; }
+    if (e.target.closest("[data-key]")) { this.app.keyPopover(e.target.closest("[data-key]"), id); return; }
     if (e.shiftKey && this.lastClicked != null) {
       const ids = this.rows.map((r) => r.id);
       const [i, j] = [ids.indexOf(this.lastClicked), ids.indexOf(id)].sort((x, y) => x - y);

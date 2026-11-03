@@ -4,6 +4,7 @@ import { Deck, ctx } from "./deck.js";
 import { Library } from "./library.js";
 import { h, $, $$, toast, prompt, confirmBox, keyColor, closePopover, modal, closeModal } from "./ui.js";
 import { renderMashups, renderTags, renderSettings, importModal, uploadFiles, ideaFilterModal, helpModal } from "./views.js";
+import { renderKeys, keyPopover } from "./keys.js";
 
 class App {
   constructor() {
@@ -44,6 +45,8 @@ class App {
   }
 
   // ------------------------------------------------------------------ data
+  keyPopover(anchor, id) { keyPopover(this, anchor, id); }
+
   keyInfo(code) { return this.keys[code] || { name: "", short: "", compatible: [] }; }
   genres() { return [...new Set(this.tracks.map((t) => t.genre).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pl")); }
 
@@ -385,6 +388,7 @@ class App {
     if (v === "mashups") renderMashups(this);
     if (v === "tags") renderTags(this);
     if (v === "settings") renderSettings(this);
+    if (v === "keys") renderKeys(this);
     this.renderPlaylists();
   }
 
