@@ -240,7 +240,35 @@ def to_level(raw: float) -> int:
     return int(np.clip(round(1 + 9 * raw), 1, 10))
 
 
+def _beat_kicks(y: np.ndarray, sr: int, beats: np.ndarray) -> np.ndarray:
+    """Kick strength on each beat: low-band (<150 Hz) onset peak within +-35 ms of the beat."""
+    hop = 256
+    mel = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=hop, n_mels=64, fmax=8000)
+    mel_f = librosa.mel_frequencies(n_mels=64, fmax=8000)
+    # linear magnitude flux: a kick is a big burst of low-end energy even under a sustained bassline
+    low = librosa.onset.onset_strength(S=np.sqrt(mel[mel_f < 150]), sr=sr, hop_length=hop, lag=1, max_size=1)
+    fr = librosa.time_to_frames(beats, sr=sr, hop_length=hop) + 1  # onset peaks ~1 hop after the attack
+    w = max(1, int(0.035 * sr / hop))
+    return np.array([low[max(0, f - w) : f + w + 1].max() if f < len(low) else 0.0 for f in fr])
+
+
+def _runs(state: np.ndarray) -> list[tuple[bool, int, int]]:
+    out, i = [], 0
+    while i < len(state):
+        j = i
+        while j < len(state) and state[j] == state[i]:
+            j += 1
+        out.append((bool(state[i]), i, j))
+        i = j
+    return out
+
+
 def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int = SR) -> dict:
+    """Energy level, cue points on real section changes and the section type of each part.
+
+    Cues go where DJs expect them: the first beat of the music, the beat where the kick drops
+    out (breakdown) and the beat where it comes back (drop), then other strong changes on the
+    4/8-bar phrase grid. The kick changes also vote for the bar's downbeat ("1")."""
     dur = len(y) / sr
     rms = librosa.feature.rms(y=y, hop_length=HOP)[0]
     db = librosa.amplitude_to_db(rms, ref=1.0)
@@ -258,11 +286,58 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
     track_raw = _energy_raw(db_active, onset_rate, cen, bpm)
     energy = to_level(track_raw)
 
-    # --- bar-level features ---
-    bar = 4 * 60.0 / bpm
+    beat = 60.0 / bpm
+    bar = 4 * beat
+    # --- kick on every beat of the grid ---
+    b0 = first_downbeat - math.floor(first_downbeat / beat) * beat  # first beat >= 0
+    beats = np.arange(b0, dur - 0.05, beat)
+    kicks = _beat_kicks(y, sr, beats)
+    ref = np.percentile(kicks, 90) if len(kicks) else 1.0
+    has_kick = kicks > 0.35 * (ref + 1e-9)
+    # beat index of the first downbeat
+    d0 = int(round((first_downbeat - b0) / beat))
+
+    def kick_events(phase: int):
+        """(kind, beat index) for kick-out runs of >= 2 bars, with bars starting at `phase`."""
+        nbar = (len(beats) - phase) // 4
+        if nbar < 4:
+            return [], np.zeros(0, bool), nbar
+        kb = has_kick[phase : phase + nbar * 4].reshape(nbar, 4).mean(axis=1) >= 0.5
+        ev = []
+        runs = _runs(kb)
+        for k, (state, s0, e0) in enumerate(runs):
+            if state or e0 - s0 < 2:
+                continue
+            if s0 > 0:  # kick stops: the beat after the last kick
+                last = phase + s0 * 4 - 1
+                while last > 0 and not has_kick[last]:
+                    last -= 1
+                ev.append(("out", last + 1, e0 - s0))
+            if e0 < nbar:  # kick returns: the first kick beat
+                first = phase + e0 * 4 - 4
+                while first < len(has_kick) - 1 and not (has_kick[first] and has_kick[first + 1: first + 3].any()):
+                    first += 1
+                ev.append(("in", first, e0 - s0))
+        return ev, kb, nbar
+
+    # downbeat vote: section changes almost always land on the "1"
+    ev, _, _ = kick_events(d0 % 4)
+    votes = np.zeros(4)
+    for kind, bi, n in ev:
+        votes[bi % 4] += 2 if kind == "in" else 1
+    if votes.sum() >= 3:
+        best = int(np.argmax(votes))
+        if best != d0 % 4 and votes[best] >= 0.6 * votes.sum():
+            d0 = best
+    first_downbeat = float(beats[d0 % 4]) if len(beats) > d0 % 4 else first_downbeat
+    phase = d0 % 4
+    ev, kick_bar, nkb = kick_events(phase)
+
+    # --- bar features (bars start on the downbeat) ---
     start = first_downbeat
-    while start - bar >= 0:
-        start -= bar  # include pickup bars before the detected downbeat
+    while start - bar >= -1e-6:
+        start -= bar
+    start = max(0.0, start)
     edges = np.arange(start, dur + bar, bar)
     feats, bar_db, bar_on, bar_cen = [], [], [], []
     for a, b in zip(edges[:-1], edges[1:]):
@@ -277,59 +352,107 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
         feats.append(np.concatenate([[bd / 10.0], mfcc[1:, m].mean(axis=1) / 50.0, chroma[:, m].mean(axis=1)]))
     F = np.array(feats)
     nb = len(F)
-    # checkerboard novelty on the bar self-similarity matrix
+    bdb = np.array(bar_db)
     Fn = (F - F.mean(axis=0)) / (F.std(axis=0) + 1e-6)
     Fn /= np.linalg.norm(Fn, axis=1, keepdims=True) + 1e-9
     ssm = Fn @ Fn.T
     L = 4
     nov = np.zeros(nb)
     for i in range(L, nb - L + 1):
-        past = ssm[i - L : i, i - L : i].mean()
-        fut = ssm[i : i + L, i : i + L].mean()
-        cross = ssm[i - L : i, i : i + L].mean()
-        nov[i] = past + fut - 2 * cross
-    # loudness jumps are what DJs care about most (drops/breakdowns)
-    bdb = np.array(bar_db)
+        nov[i] = ssm[i - L : i, i - L : i].mean() + ssm[i : i + L, i : i + L].mean() - 2 * ssm[i - L : i, i : i + L].mean()
     jump = np.zeros(nb)
     for i in range(2, nb - 1):
         jump[i] = abs(bdb[i : i + 2].mean() - bdb[i - 2 : i].mean()) / 6.0
     score = nov / (nov.max() + 1e-9) + jump
-    # first musical bar = first bar louder than silence
-    first_bar = int(np.argmax(bdb > (bdb.max() - 35))) if nb else 0
-    # phrase grid: DJ tracks are built from 8-bar phrases; find where they start
-    origin = max(range(8), key=lambda o: sum(sorted((score[i] for i in range(first_bar + o, nb, 8)), reverse=True)[:4]))
-    origin = first_bar + origin if origin < 8 else first_bar
-    on_phrase = lambda i: (i - origin) % 8 == 0
-    cands = [i for i in range(first_bar + 4, nb - 2) if on_phrase(i) or ((i - origin) % 4 == 0 and score[i] > 1.0)]
-    cands.sort(key=lambda i: -score[i])
-    chosen = [first_bar]
-    for i in cands:
-        if len(chosen) >= 8 or score[i] < 0.2:
+
+    def bar_of(t: float) -> int:
+        return int(round((t - start) / bar))
+
+    def beat_time(bi: int) -> float:
+        return float(beats[min(bi, len(beats) - 1)])
+
+    # --- cue candidates: (priority, time, kind) ---
+    cands: list[tuple[float, float, str]] = []
+    silent = bdb.max() - 35 if nb else 0
+    first_bar = int(np.argmax(bdb > silent)) if nb else 0
+    # first beat of the music (its first transient on the grid)
+    beat_db = np.array([db[max(0, f - 2) : f + 3].max() for f in librosa.time_to_frames(beats, sr=sr, hop_length=HOP)]) if len(beats) else np.zeros(1)
+    loud_beats = np.flatnonzero(beat_db > silent)
+    t_first = beat_time(int(loud_beats[0])) if len(loud_beats) else 0.0
+    cands.append((100.0, t_first, "intro"))
+    end_t = dur - 8 * bar  # a kick change in the last bars (fade-out) is no use as a cue
+    for kind, bi, n in ev:
+        t = beat_time(bi)
+        if t >= end_t or t <= t_first + beat:
+            continue
+        near_end = t > dur * 0.8
+        if kind == "out":
+            k = "outro" if near_end and not any(e[0] == "in" and beat_time(e[1]) > t for e in ev) else "break"
+            cands.append((50 + min(n, 16) * 2, t, k))
+        else:
+            cands.append((60 + min(n, 16) * 2, t, "drop" if n >= 4 else "main"))
+    # phrase grid anchored on the first drop (or the first kick)
+    anchors = [t for _, t, k in cands if k == "drop"] or [t_first]
+    origin = bar_of(anchors[0]) % 4
+    for i in np.argsort(-score):
+        if score[i] < 0.6 or i <= first_bar or i >= nb - 2:
+            continue
+        if score[i] < score[max(0, i - 2) : i + 3].max():
+            continue  # only the peak of a change, never a neighbouring bar
+        if (i - origin) % 4 and score[i] < 1.0:  # off the phrase grid only for a clear change
+            continue
+        up = bdb[i : i + 2].mean() - bdb[max(0, i - 2) : i].mean()
+        cands.append((10 + 10 * float(score[i]), float(edges[i]), "drop" if up >= 6 else "main"))
+    # pick the strongest, at least 4 bars apart (8 for weaker ones)
+    chosen: list[tuple[float, str]] = []
+    for pr, t, k in sorted(cands, key=lambda c: -c[0]):
+        if len(chosen) >= 8:
             break
-        if all(abs(i - c) >= 8 for c in chosen):
-            chosen.append(i)
-    # fill remaining cues on the 32/16/8-bar phrase grid
-    for step in (32, 16, 8):
-        for i in range(origin + step, nb - 2, step):
-            if len(chosen) >= 8:
+        if all(abs(t - c) >= 4 * bar - 0.05 for c, _ in chosen):
+            chosen.append((t, k))
+    # tracks with few clear changes: add phrase cues (every 32, then 16 bars), but only where
+    # the kick plays, so a cue never lands in the middle of a breakdown
+    o_bar = bar_of(anchors[0])
+    for step in (32, 16):
+        for i in range(o_bar % step, nb - 8, step):
+            if len(chosen) >= 4:
                 break
-            if all(abs(i - c) >= step // 2 for c in chosen):
-                chosen.append(i)
-    chosen = sorted(set(chosen))[:8]
-    cues = [round(float(edges[i]), 3) for i in chosen]
+            t = float(edges[i])
+            in_kick = nkb == 0 or (i < nkb and kick_bar[i:i + 4].mean() >= 0.75)
+            if i > first_bar and in_kick and all(abs(t - c) >= (step // 2) * bar - 0.05 for c, _ in chosen):
+                chosen.append((t, "main"))
+    chosen.sort()
+    # name the parts from what is actually playing in them
+    labelled = []
+    for idx, (t, k) in enumerate(chosen):
+        t_next = chosen[idx + 1][0] if idx + 1 < len(chosen) else dur
+        b_a, b_b = bar_of(t), max(bar_of(t) + 1, bar_of(t_next))
+        kb = kick_bar[max(0, min(b_a, nkb)) : max(0, min(b_b, nkb))] if nkb else np.zeros(0, bool)
+        kick_frac = float(kb.mean()) if len(kb) else 1.0
+        if idx == 0:
+            k = "intro"
+        elif k == "main" and kick_frac < 0.5:
+            k = "build" if idx + 1 < len(chosen) and chosen[idx + 1][1] in ("drop", "main") else "break"
+        labelled.append((t, k))
+    if len(labelled) > 1 and labelled[-1][1] == "main" and dur - labelled[-1][0] < 0.25 * dur:
+        a, p0 = bar_of(labelled[-1][0]), bar_of(labelled[-2][0])
+        if a < nb and bdb[a:].mean() < bdb[p0:a].mean() - 1.0:
+            labelled[-1] = (labelled[-1][0], "outro")
+    cues = [round(t, 3) for t, _ in labelled]
 
     # segment energy between cues
     segments = []
-    bounds = chosen + [nb]
-    for a, b in zip(bounds[:-1], bounds[1:]):
+    bounds = [bar_of(t) for t in cues] + [nb]
+    for (t, k), a, b in zip(labelled, bounds[:-1], bounds[1:]):
+        a = max(0, min(a, nb - 1))
         sl = slice(a, max(a + 1, b))
-        seg_db = float(np.mean(bdb[sl]))
-        seg_on = float(np.mean(bar_on[sl]))
-        seg_cen = float(np.mean(bar_cen[sl]))
-        raw = _energy_raw(seg_db, seg_on, seg_cen, bpm)
+        raw = _energy_raw(float(np.mean(bdb[sl])), float(np.mean(bar_on[sl])), float(np.mean(bar_cen[sl])), bpm)
         lvl = int(np.clip(round(energy + (raw - track_raw) * 9 * 1.3), 1, 10))
-        segments.append({"start": round(float(edges[a]), 3), "end": round(float(edges[min(b, nb)]), 3), "energy": lvl})
-    return {"energy": energy, "cues": cues, "segments": segments, "bar_db": [round(v, 2) for v in bdb.tolist()]}
+        segments.append({"start": round(t, 3), "end": round(float(edges[min(b, nb)]) if b < nb else dur, 3), "energy": lvl, "kind": k})
+    for i in range(len(segments) - 1):
+        segments[i]["end"] = segments[i + 1]["start"]
+    return {"energy": energy, "cues": cues, "segments": segments, "first_downbeat": round(first_downbeat, 4),
+            "bar_db": [round(v, 2) for v in bdb.tolist()]}
 
 
 def waveform(path: str, duration_hint: float | None = None) -> dict:
@@ -360,7 +483,8 @@ def analyze_file(path: str, learned: dict | None = None, bpm_range: tuple[float,
     max_len = SR * 480
     yk = y if len(y) <= max_len else y[(len(y) - max_len) // 2 : (len(y) + max_len) // 2]
     tempo = detect_tempo(y, bpm_range=bpm_range)
+    struct = analyze_structure(y, tempo["bpm"], tempo["first_downbeat"])
+    tempo["first_downbeat"] = struct.pop("first_downbeat")  # may be corrected by the section changes
     feats = key_features(yk, tempo["bpm"], tempo["first_downbeat"] - (len(y) - len(yk)) / 2 / SR)
     key = key_from_features(feats, learned)
-    struct = analyze_structure(y, tempo["bpm"], tempo["first_downbeat"])
     return {"duration": round(dur, 3), **key, **tempo, **struct, "key_features": feats}

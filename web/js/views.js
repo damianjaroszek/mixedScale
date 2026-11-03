@@ -270,6 +270,8 @@ export function helpModal() {
       row("Shift + 1 – 8", "Skok do cue na decku B"),
       row("L / K", "Pętla na decku A / B"),
       row("C / Shift + C", "Dodaj cue w najbliższym beacie na decku A / B"),
+      row("Przeciągnij waveform", "Płynne przewijanie utworu (jak w Traktorze). Kółko: zoom, Ctrl + kółko: o jeden beat"),
+      row("Shift + przeciągnij", "Przesuń siatkę beatów razem z cue. Shift + kółko: siatka o 1 ms"),
       row("Ctrl + Z", "Cofnij ostatnią zmianę cue, siatki lub tonacji"),
       row("‹ ›  (przytrzymaj)", "Chwilowo zwolnij / przyspiesz deck, żeby dograć fazę na ucho"),
       row("▦ Siatka", "Popraw BPM (×2, ÷2), „Beat tutaj”, „Raz tutaj”, przesuń lub usuń cue"),

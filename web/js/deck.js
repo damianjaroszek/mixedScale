@@ -3,7 +3,7 @@ import { api } from "./api.js";
 import { h, $, popover, closePopover, toast, fmtTime, keyBadge, transpose } from "./ui.js";
 
 export const ctx = new (window.AudioContext || window.webkitAudioContext)();
-const ZOOM_BARS = [0, 64, 32, 16, 8];
+const ZOOM_BARS = [0, 64, 32, 16, 8, 4, 2];
 const STEM_NAMES = { full: "Cały utwór", vocals: "Acapella", instrumental: "Instrumental" };
 
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
@@ -47,7 +47,7 @@ export class Deck {
       h("button", { class: "btn icon", title: "Oddal", onclick: (e) => { e.stopPropagation(); this.setZoom(this.zoom - 1); } }, "−"),
       h("button", { class: "btn icon", title: "Przybliż", onclick: (e) => { e.stopPropagation(); this.setZoom(this.zoom + 1); } }, "+"));
     this.waveBox = h("div", { class: "wave-box" }, this.canvas, this.emptyEl, zoom, this.busyEl);
-    this.waveBox.addEventListener("mousedown", (e) => { if (e.button === 0) this.onWaveClick(e); });
+    this.waveBox.addEventListener("pointerdown", (e) => this.onWaveDown(e));
     this.waveBox.addEventListener("contextmenu", (e) => {
       if (!this.track) return;
       e.preventDefault();
@@ -59,7 +59,7 @@ export class Deck {
       this.draw();
       this.gridPopover(this.gridBtn);
     });
-    this.waveBox.addEventListener("wheel", (e) => { if (!this.track) return; e.preventDefault(); this.setZoom(this.zoom + (e.deltaY < 0 ? 1 : -1)); }, { passive: false });
+    this.waveBox.addEventListener("wheel", (e) => this.onWaveWheel(e), { passive: false });
 
     this.playBtn = h("button", { class: "play", title: "Odtwórz / pauza", onclick: () => this.toggle() }, "▶");
     this.nameEl = h("div", { class: "deck-name" }, "—");
@@ -514,8 +514,12 @@ export class Deck {
       return sg ? sg.energy : E;
     };
     const es = cues.map(energyAt);
+    const KIND = { intro: "Intro", start: "Start", main: "Main", build: "Build", break: "Break", drop: "Drop", outro: "Outro" };
     return cues.map((c, i) => {
       const e = es[i], pe = es[i - 1], ne = es[i + 1];
+      // section type found by the analysis (kick out = break, kick back = drop)
+      const seg = segs.find((g) => g.kind && Math.abs(g.start - c) < 0.06);
+      if (seg && KIND[seg.kind]) return { time: c, energy: e, label: KIND[seg.kind] };
       let label = "Main";
       if (i === 0) label = e < E ? "Intro" : "Start";
       else if (i === cues.length - 1 && e < E && (t.duration || 0) - c < 90) label = "Outro";
@@ -578,13 +582,15 @@ export class Deck {
   }
 
   // shift the whole grid (beats, downbeat and cues) by dt seconds
-  shiftGrid(dt) {
+  shiftGrid(dt, msg) {
     const t = this.track;
     return this.saveGrid({
       beat_offset: Math.max(0, (t.beat_offset || 0) + dt),
       first_downbeat: Math.max(0, (t.first_downbeat || 0) + dt),
       cues: (t.cues || []).map((c) => Math.max(0, c + dt)),
-    });
+      // keep the section names attached to their (moved) cues
+      segments: (t.segments || []).map((g) => ({ ...g, start: Math.round((g.start + dt) * 1000) / 1000, end: Math.round((g.end + dt) * 1000) / 1000 })),
+    }, msg);
   }
 
   nearestBeat(pos) {
@@ -616,6 +622,14 @@ export class Deck {
         } }, "„Raz” tutaj"),
         h("button", { class: "btn", title: "Siatka 5 ms wcześniej", onclick: () => this.shiftGrid(-0.005) }, "◀ 5 ms"),
         h("button", { class: "btn", title: "Siatka 5 ms później", onclick: () => this.shiftGrid(0.005) }, "5 ms ▶")),
+      h("div", { class: "pop-row" },
+        h("button", { class: "btn" + (this.gridEdit ? " accent" : ""), title: "Przeciągaj siatkę myszą po waveformie (albo przytrzymaj Shift). Kółko myszy = 1 ms.", onclick: () => {
+          closePopover();
+          this.gridEdit = !this.gridEdit;
+          this.waveBox.classList.toggle("grid-edit", this.gridEdit);
+          if (this.gridEdit && this.zoom < 3) this.setZoom(3); else this.draw();
+          toast(this.gridEdit ? `Deck ${this.name}: przeciągnij waveform, żeby przesunąć siatkę (kółko = 1 ms). Kliknij ponownie, aby wyjść.` : "Edycja siatki zakończona");
+        } }, this.gridEdit ? "✓ Koniec przesuwania siatki" : "✥ Przesuwaj siatkę myszą")),
       h("h4", { style: { marginTop: "12px" } }, "Cue pointy"),
       h("div", { class: "pop-row" },
         h("button", { class: "btn", title: "Dodaj cue w najbliższym beacie (C)", onclick: () => { closePopover(); this.addCueHere(); } }, "+ Cue tutaj"),
@@ -664,6 +678,80 @@ export class Deck {
     return [v0, v0 + span];
   }
 
+  // Traktor-style mouse handling: drag the waveform to scroll through the track smoothly,
+  // Shift+drag (or "Przesuwaj siatkę" mode) drags the beat grid with cues, click = seek.
+  onWaveDown(e) {
+    if (!this.track || e.button !== 0 || e.target.closest(".wave-zoom")) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const [v0, v1] = this.view();
+    const secPerPx = (v1 - v0) / rect.width;
+    const grid = e.shiftKey || this.gridEdit;
+    const t = this.track;
+    const orig = { beat_offset: t.beat_offset || 0, first_downbeat: t.first_downbeat || 0, cues: [...(t.cues || [])], segments: t.segments };
+    const pos0 = this.position(), x0 = e.clientX, wasPlaying = this.playing;
+    let dragging = false, dt = 0;
+    this.waveBox.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const dx = ev.clientX - x0;
+      if (!dragging && Math.abs(dx) < 4) return;
+      if (!dragging) {
+        dragging = true;
+        this.gridDragging = grid;
+        if (!grid && wasPlaying) this.pause();
+      }
+      if (grid) {
+        dt = dx * secPerPx;
+        t.beat_offset = Math.max(0, orig.beat_offset + dt);
+        t.first_downbeat = Math.max(0, orig.first_downbeat + dt);
+        t.cues = orig.cues.map((c) => Math.max(0, c + dt));
+        t.segments = (orig.segments || []).map((g) => ({ ...g, start: g.start + dt, end: g.end + dt }));
+        this.renderPads();
+      } else {
+        // zoomed: the waveform moves under the playhead; overview: the playhead follows the mouse
+        this.pausedOrig = Math.max(0, Math.min(t.duration || 0, pos0 + (this.zoom ? -dx : dx) * secPerPx));
+      }
+      this.draw();
+    };
+    const up = (ev) => {
+      this.waveBox.removeEventListener("pointermove", move);
+      this.waveBox.removeEventListener("pointerup", up);
+      this.waveBox.removeEventListener("pointercancel", up);
+      this.gridDragging = false;
+      if (!dragging) { this.onWaveClick(ev); return; }
+      if (grid) {
+        Object.assign(t, orig);
+        if (Math.abs(dt) > 0.0005) this.shiftGrid(dt, `Siatka przesunięta o ${(dt * 1000).toFixed(0)} ms`);
+        else this.draw();
+      } else if (wasPlaying) this.play(this.pausedOrig, this.quantizedStart());
+    };
+    this.waveBox.addEventListener("pointermove", move);
+    this.waveBox.addEventListener("pointerup", up);
+    this.waveBox.addEventListener("pointercancel", up);
+  }
+
+  // wheel: zoom; Shift+wheel: nudge the grid by 1 ms; Ctrl/Alt+wheel: scroll by one beat
+  onWaveWheel(e) {
+    if (!this.track) return;
+    e.preventDefault();
+    const dir = e.deltaY < 0 ? 1 : -1;
+    if (e.shiftKey || this.gridEdit) {
+      this.wheelShift = (this.wheelShift || 0) + dir * 0.001;
+      const t = this.track;
+      t.beat_offset = (t.beat_offset || 0) + dir * 0.001;
+      t.first_downbeat = (t.first_downbeat || 0) + dir * 0.001;
+      this.draw();
+      clearTimeout(this.wheelTimer);
+      this.wheelTimer = setTimeout(() => {
+        const d = this.wheelShift;
+        this.wheelShift = 0;
+        t.beat_offset -= d; t.first_downbeat -= d;
+        this.shiftGrid(d, `Siatka przesunięta o ${(d * 1000).toFixed(0)} ms`);
+      }, 500);
+    } else if (e.ctrlKey || e.altKey) {
+      this.seek(this.position() - dir * this.beatLen());
+    } else this.setZoom(this.zoom + dir);
+  }
+
   onWaveClick(e) {
     if (!this.track) return;
     const rect = this.canvas.getBoundingClientRect();
@@ -696,7 +784,7 @@ export class Deck {
     const deckColor = css(this.name === "A" ? "--deck-a" : "--deck-b");
 
     // beat / bar grid when zoomed in
-    if (this.zoom && t.bpm) {
+    if ((this.zoom || this.gridDragging || this.gridEdit) && t.bpm) {
       const beat = 60 / t.bpm, fd = t.first_downbeat || 0;
       let k = Math.ceil((v0 - fd) / beat);
       for (let bt = fd + k * beat; bt < v1; bt += beat, k++) {

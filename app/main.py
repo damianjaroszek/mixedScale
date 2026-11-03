@@ -284,6 +284,7 @@ class TrackPatch(BaseModel):
     first_downbeat: float | None = None
     beat_offset: float | None = None
     cues: list[float] | None = None
+    segments: list[dict] | None = None
     key_manual: int | None = None
     write_file: bool = False
 

@@ -62,7 +62,7 @@ def test_key_and_tempo(client):
         assert t["status"] == "done", t["error"]
         assert t["key"] == key, (name, t["key"])
         assert abs(t["bpm"] - bpm) < 0.5, (name, t["bpm"])
-        assert 4 <= len(t["cues"]) <= 8
+        assert 3 <= len(t["cues"]) <= 8
         assert abs(t["cues"][0] - 0.25) < 0.05, t["cues"][0]  # first downbeat
 
 
@@ -167,6 +167,33 @@ def test_realistic_grid_and_phrase_cues(tmp_path):
     last = gt["boundaries"][-1] + 15 * 4 * beat
     k = round((last - r["beat_offset"]) / (60 / r["bpm"]))
     assert abs(r["beat_offset"] + k * 60 / r["bpm"] - last) < 0.015
+
+
+def test_cues_on_kick_changes_and_downbeat_vote(tmp_path):
+    """Odd section lengths, a 1-bar gap before the drop; cues must sit on the beat where the kick
+    stops / returns, and a wrong downbeat guess is corrected by those changes."""
+    from app import analysis
+    from app.ffmpeg import decode
+    from app.synth import make_realistic
+
+    p = str(tmp_path / "odd.wav")
+    sec = [("intro", 6), ("build", 16), ("break", 12), ("gap", 1), ("drop", 24), ("break", 8), ("drop", 16), ("outro", 12)]
+    gt = make_realistic(p, "A", "minor", 126, offset=0.37, sections=sec, seed=1)
+    beat = 60 / 126
+    y = decode(p, sr=analysis.SR, mono=True)
+    for wrong in (0, 1, 2, 3):
+        s = analysis.analyze_structure(y, 126.0, gt["downbeat"] + wrong * beat)
+        assert abs(s["first_downbeat"] - gt["downbeat"]) < 0.02, (wrong, s["first_downbeat"])
+        kinds = {round(g["start"], 1): g["kind"] for g in s["segments"]}
+        for (name, _), b in zip(sec, gt["boundaries"]):
+            if name == "gap":
+                continue
+            hit = [k for t, k in kinds.items() if abs(t - b) < beat / 2]
+            assert hit, (name, b, kinds)
+            if name in ("break", "outro"):
+                assert hit[0] == name, (name, hit)
+        drops = [t for t, k in kinds.items() if k == "drop"]
+        assert any(abs(t - gt["boundaries"][4]) < beat / 2 for t in drops)  # the drop after the gap
 
 
 def test_grid_patch(client):

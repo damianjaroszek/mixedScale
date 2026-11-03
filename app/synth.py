@@ -120,7 +120,7 @@ def make_realistic(path, tonic="A", mode="minor", bpm=124.0, offset=0.0, section
         for b in range(b0, b0 + n):
             t0 = offset + b * 4 * beat
             deg, chord = prog[b % 4]
-            has_kick = name != "break"
+            has_kick = name not in ("break", "gap")
             has_chords = name in ("build", "break", "drop")
             has_bass = name in ("build", "drop")
             loud = 1.0 if name == "drop" else 0.7
@@ -132,7 +132,7 @@ def make_realistic(path, tonic="A", mode="minor", bpm=124.0, offset=0.0, section
                     place(buf, kick(0.85 * loud), t0 + k * beat)
                 if has_bass:
                     place(buf, tone(midi_hz(root - 24 + deg), beat / 2, kind="sine", amp=0.3 * loud), t0 + k * beat + beat / 2)
-                if name != "break":
+                if name not in ("break", "gap"):
                     for s in range(4):
                         place(buf, hat(0.06 if s % 2 else 0.1), t0 + k * beat + s * beat / 4)
                 if k in (1, 3) and name in ("build", "drop", "outro"):
