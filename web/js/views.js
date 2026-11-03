@@ -144,6 +144,15 @@ export function renderSettings(app) {
     toast("Ustawienia zapisane");
   } }, "Zapisz ustawienia");
   const row = (label, el, hint) => [h("label", {}, label), el, hint ? h("div", { class: "hint" }, hint) : null];
+  const exportBtn = (url, label) => h("div", {}, h("button", { class: "btn", onclick: async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    try {
+      const r = await api.post(url);
+      toast(`Zapisano ${r.tracks} utworów i ${r.playlists} playlist: ${r.path}`, { ms: 9000, action: { label: "Pokaż folder", fn: () => api.post("/api/open-folder", { path: f.export_dir.value }) } });
+    } catch (err) { toast(err.message, { error: true }); }
+    b.disabled = false;
+  } }, label));
   $("#view-settings").replaceChildren(h("div", { class: "pad" },
     h("h2", { style: { marginTop: 0 } }, "Ustawienia"),
     h("div", { class: "settings-grid" },
@@ -157,16 +166,11 @@ export function renderSettings(app) {
       h("span"), h("div", {}, save)),
     h("h3", {}, "Eksport do innych programów DJ"),
     h("div", { class: "settings-grid" },
-      row("Rekordbox", h("div", {}, h("button", { class: "btn", onclick: async (e) => {
-        e.currentTarget.disabled = true;
-        try {
-          const r = await api.post("/api/export/rekordbox");
-          toast(`Zapisano ${r.tracks} utworów i ${r.playlists} playlist: ${r.path}`, { ms: 9000 });
-        } catch (err) { toast(err.message, { error: true }); }
-        e.target.disabled = false;
-      } }, "Zapisz bibliotekę jako rekordbox XML")),
+      row("Rekordbox", exportBtn("/api/export/rekordbox", "Zapisz bibliotekę jako rekordbox XML"),
         "BPM z siatką, tonacja, ocena, komentarz, hot cue A–H i playlisty. W Rekordbox: Preferencje → Zaawansowane → Baza danych → rekordbox xml, wskaż plik, potem w drzewie „rekordbox xml” przeciągnij utwory do kolekcji."),
-      row("Serato, Traktor, VirtualDJ", h("span", {}, "Włącz „Wpisuj tonację do tagów po analizie”. Te programy czytają tonację i BPM z tagów pliku."))),
+      row("Traktor Pro", exportBtn("/api/export/traktor", "Zapisz bibliotekę dla Traktora (.nml)"),
+        "BPM z zablokowaną siatką, tonacja, ocena, komentarz, 8 hot cue i playlisty (folder „Blendora”). W Traktorze: przeglądarka → prawy klik na „Track Collection” → Import Another Collection → wskaż plik. Traktor sam robi kopię swojej kolekcji przed importem."),
+      row("Serato, VirtualDJ", h("span", {}, "Włącz „Wpisuj tonację do tagów po analizie”. Te programy czytają tonację i BPM z tagów pliku."))),
     h("h3", {}, "Silniki"),
     h("div", { class: "settings-grid" },
       row("Zmiana tonacji / tempa", h("span", {}, st.rubberband ? "Rubber Band (wysoka jakość)" : "ffmpeg asetrate/atempo (zainstaluj ffmpeg z Rubber Band dla lepszej jakości)")),

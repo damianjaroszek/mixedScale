@@ -223,3 +223,20 @@ def test_rekordbox_xml():
     assert [m.get("Num") for m in hot] == ["0", "1"]
     pl = x.find("PLAYLISTS/NODE/NODE/NODE")
     assert pl.get("Name") == "Set" and pl.get("Entries") == "1"
+
+
+def test_traktor_nml():
+    import xml.etree.ElementTree as ET
+    from app import traktor
+    assert traktor.split_location(r"C:\Users\Damian\Music\a b.mp3") == ("C:", "/:Users/:Damian/:Music/:", "a b.mp3")
+    assert traktor.primary_key(r"D:\x\y.mp3") == "D:/:x/:y.mp3"
+    assert traktor.key_value("8A") == 21 and traktor.key_value("8B") == 0
+    t = {"id": 1, "path": r"C:\M\t.mp3", "title": "T", "artist": "A", "album": "", "genre": "", "duration": 100, "year": "",
+         "bpm": 120.0, "key": "8A", "comment": "", "rating": 5, "first_downbeat": 2.5, "beat_offset": 0.5, "cues": [2.5, 34.5]}
+    x = ET.fromstring(traktor.build([t], [("Set", [1])]))
+    e = x.find("COLLECTION/ENTRY")
+    cues = e.findall("CUE_V2")
+    assert cues[0].get("TYPE") == "4" and abs(float(cues[0].get("START")) - 500) < 1e-3
+    assert [c.get("HOTCUE") for c in cues[1:]] == ["0", "1"] and cues[2].get("START") == "34500.000000"
+    assert e.find("MUSICAL_KEY").get("VALUE") == "21" and e.find("INFO").get("RANKING") == "255"
+    assert x.find(".//PRIMARYKEY").get("KEY") == "C:/:M/:t.mp3"

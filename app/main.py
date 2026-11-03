@@ -712,6 +712,17 @@ def export_rekordbox():
     return {"path": str(dst), "tracks": len(tracks), "playlists": len(pls)}
 
 
+@app.post("/api/export/traktor")
+def export_traktor():
+    """Whole analysed library + all playlists as a Traktor Pro collection (.nml) in the export folder."""
+    from . import traktor
+    tracks = db.q(f"SELECT {TRACK_COLS} FROM tracks WHERE status = 'done'")
+    pls = [(p["name"], playlist_tracks(p["id"])) for p in db.q("SELECT id, name FROM playlists ORDER BY sort, id")]
+    dst = _export_dir() / "blendora_traktor.nml"
+    dst.write_bytes(traktor.build(tracks, pls))
+    return {"path": str(dst), "tracks": len(tracks), "playlists": len(pls)}
+
+
 # ---------------------------------------------------------------- saved mashups
 class MashupReq(BaseModel):
     track_a: int
