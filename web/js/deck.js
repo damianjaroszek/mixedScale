@@ -75,7 +75,7 @@ export class Deck {
     this.loopBtn = h("button", { class: "btn", title: "Włącz/wyłącz pętlę (L)", onclick: () => this.toggleLoop() }, "⟳ Pętla");
     this.loopSize = h("button", { class: "btn", onclick: (e) => this.loopPopover(e.currentTarget) }, "16");
     this.syncBtn = h("button", { class: "btn" + (this.sync ? " on" : ""), title: "Dopasuj tempo do drugiego decku (bez zmiany tonacji)", onclick: () => this.toggleSync() }, "Sync");
-    this.exportBtn = h("button", { class: "btn right", onclick: (e) => this.exportPopover(e.currentTarget) }, "⤓ Eksport");
+    this.exportBtn = h("button", { class: "btn right", title: "Eksport z aktualną tonacją / stemem", onclick: (e) => this.exportPopover(e.currentTarget) }, "⤓");
     this.gridBtn = h("button", { class: "btn", title: "Popraw siatkę beatów, BPM i cue pointy", onclick: (e) => this.gridPopover(e.currentTarget) }, "▦ Siatka");
     const nudge = (label, r, title) => {
       const b = h("button", { class: "btn nudge", title }, label);
@@ -92,6 +92,7 @@ export class Deck {
       this.waveBox,
       h("div", { class: "deck-title" }, this.playBtn, this.nameEl, this.swapBtn),
       h("div", { class: "deck-info" }, this.keyEl, this.keyName, h("span", { class: "sep" }), this.bpmEl, h("span", { class: "sep" }), this.energyEl, this.timeEl),
+      this.padsEl = h("div", { class: "cue-pads" }),
       h("div", { class: "deck-ctrl" }, this.keyBtn, this.stemBtn, h("span", { style: { display: "inline-flex" } }, this.loopBtn, this.loopSize), this.syncBtn, this.nudgeEl, this.gridBtn, this.exportBtn),
     );
     // drag & drop from library
@@ -142,15 +143,17 @@ export class Deck {
     this.playBtn.classList.toggle("on", this.playing);
     this.playBtn.textContent = this.playing ? "❚❚" : "▶";
     this.emptyEl.classList.toggle("hidden", !!t);
+    this.renderPads();
     this.draw();
   }
 
   // ------------------------------------------------------------------ loading
-  async load(track, { semitones = 0, stem = "full", cue = 0 } = {}) {
+  async load(track, { semitones = 0, stem = "full", cue } = {}) {
     this.stop();
     this.track = track;
     this.params = { stem: track.stems && track.stems !== "none" && track.stems !== "running" ? stem : "full", semitones, tempo: 1 };
     this.loop.on = false;
+    if (cue == null || cue < 0) cue = this.defaultCue();
     this.selCue = cue;
     this.pausedOrig = this.cueTime(cue);
     this.wave = null;
@@ -304,6 +307,7 @@ export class Deck {
   jumpCue(i) {
     if (!this.track || i >= this.cues().length) return;
     this.selCue = i;
+    this.renderPads();
     const t = this.cueTime(i);
     if (this.loop.on) this.setLoopAt(t);
     if (this.playing) this.play(t, this.quantizedStart());
@@ -489,6 +493,59 @@ export class Deck {
         } catch (err) { toast(err.message, { error: true }); }
       } }, "Eksportuj do folderu")),
     ], { align: "right" });
+  }
+
+  // ------------------------------------------------------------------ cue pads & section names
+  // Name each cue from the energy of the section it starts: Intro, Build, Break, Drop, Main, Outro.
+  cueInfo() {
+    const t = this.track;
+    if (!t) return [];
+    const cues = this.cues(), segs = t.segments || [], E = t.energy || 5;
+    const energyAt = (x) => {
+      const sg = segs.find((g) => x >= g.start - 0.05 && x < g.end - 0.05) || segs[segs.length - 1];
+      return sg ? sg.energy : E;
+    };
+    const es = cues.map(energyAt);
+    return cues.map((c, i) => {
+      const e = es[i], pe = es[i - 1], ne = es[i + 1];
+      let label = "Main";
+      if (i === 0) label = e < E ? "Intro" : "Start";
+      else if (i === cues.length - 1 && e < E && (t.duration || 0) - c < 90) label = "Outro";
+      else if (e <= E - 2) label = "Break";
+      else if (pe != null && e >= E && pe <= e - 2) label = "Drop";
+      else if (ne != null && ne >= e + 2) label = "Build";
+      return { time: c, energy: e, label };
+    });
+  }
+
+  // Where a mashup test should start by default: the first drop (or the first full-energy part).
+  defaultCue() {
+    const info = this.cueInfo();
+    let i = info.findIndex((c) => c.label === "Drop");
+    if (i < 0) i = info.findIndex((c) => c.energy >= (this.track?.energy || 5) && c.label !== "Intro" && c.label !== "Start");
+    return Math.max(0, i);
+  }
+
+  renderPads() {
+    if (!this.padsEl) return;
+    const info = this.cueInfo();
+    const pads = [];
+    for (let i = 0; i < 8; i++) {
+      const c = info[i];
+      if (!c) {
+        pads.push(h("button", { class: "pad empty", title: "Dodaj cue w miejscu głowicy (najbliższy beat)", disabled: !this.track, onclick: () => this.addCueHere() }, "+"));
+        continue;
+      }
+      const b = h("button", {
+        class: "pad" + (i === this.selCue ? " sel" : "") + ` lab-${c.label.toLowerCase()}`,
+        title: `Cue ${i + 1}: ${c.label}, energia ${c.energy}, ${fmtTime(c.time)}\nKlik: skocz (w rytm drugiego decku). Prawy klik: przesuń / usuń.`,
+        onclick: () => this.jumpCue(i),
+        oncontextmenu: (e) => { e.preventDefault(); this.selCue = i; this.renderPads(); this.draw(); this.gridPopover(b); },
+      }, h("b", {}, String(i + 1)), h("span", {}, c.label), h("small", {}, fmtTime(c.time)));
+      b.style.setProperty("--e", c.energy / 10);
+      pads.push(b);
+    }
+    this.padsEl.replaceChildren(...pads);
   }
 
   // ------------------------------------------------------------------ manual beat grid / cue editing
@@ -692,13 +749,15 @@ export class Deck {
     // cue markers
     g.textAlign = "left";
     g.textBaseline = "middle";
+    const info = this.cueInfo();
     this.cues().forEach((cue, i) => {
       const x = X(cue);
       if (x < -50 || x > W) return;
       const sel = i === this.selCue;
       g.fillStyle = sel ? deckColor : "rgba(255,255,255,.75)";
       g.fillRect(x, 0, 1.5 * dpr, H);
-      const label = span > 400 && W / dpr < 520 ? String(i + 1) : `Cue ${i + 1}`;
+      const name = info[i]?.label || "";
+      const label = span > 400 && W / dpr < 520 ? String(i + 1) : (W / dpr) * (60 / span) > 40 ? `${i + 1} ${name}` : `Cue ${i + 1}`;
       const tw = g.measureText(label).width + 8 * dpr;
       g.fillRect(x, 2 * dpr, tw, 15 * dpr);
       g.fillStyle = "#0b0d12";

@@ -244,6 +244,7 @@ export function helpModal() {
       row("Spacja", "Testuj mashup / zatrzymaj oba decki"),
       row("Q / W", "Play/pauza deck A / deck B"),
       row("← / →", "Poprzedni / następny pomysł"),
+      row("Przyciski 1 – 8 pod deckiem", "Klik: skok do cue (w rytm drugiego decku). Prawy klik: przesuń / usuń. „+”: dodaj cue"),
       row("1 – 8", "Skok do cue na decku A"),
       row("Shift + 1 – 8", "Skok do cue na decku B"),
       row("L / K", "Pętla na decku A / B"),

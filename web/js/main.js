@@ -158,7 +158,7 @@ class App {
     const b = this.decks.B;
     const wasTesting = this.decks.A.playing && b.playing;
     b.sync = true;
-    await this.loadDeck("B", idea.track_id, { semitones: idea.shift_b, cue: b.selCue || 0 });
+    await this.loadDeck("B", idea.track_id, { semitones: idea.shift_b }); // starts at its first drop
     if (wasTesting) b.play(b.cueTime(b.selCue), b.quantizedStart());
   }
 
