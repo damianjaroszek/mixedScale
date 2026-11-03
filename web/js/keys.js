@@ -8,6 +8,8 @@ const REL = { same: "zgodne", relative: "równoległa dur/moll", fifth: "sąsied
 function conf(c) { return h("span", { class: "conf", title: `Pewność ${Math.round((c || 0) * 100)}%` }, h("i", { style: { width: `${Math.round((c || 0) * 100)}%` } })); }
 
 async function setKey(app, id, key) {
+  const t = app.byId.get(id);
+  if (t) app.pushUndo({ id, fields: { key: t.key, key_manual: t.key_manual || 0 }, label: `tonacja ${key}` });
   app.updateTrack(await api.patch(`/api/tracks/${id}`, { key }));
 }
 

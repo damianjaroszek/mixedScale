@@ -206,3 +206,20 @@ def test_keycheck_and_learning(tmp_path):
     assert acc > 0.9
     r = key_from_features(items[0][0])
     assert set(r) >= {"key", "key2", "key_confidence"} and r["key"] != r["key2"]
+
+
+def test_rekordbox_xml():
+    import xml.etree.ElementTree as ET
+    from app import rekordbox
+    t = {"id": 3, "path": "/music/a b.mp3", "title": "T", "artist": "A", "album": "", "genre": "House", "duration": 200.4,
+         "year": "2020", "bpm": 125.0, "key": "8A", "comment": "", "rating": 4, "first_downbeat": 4.1, "beat_offset": 0.26, "cues": [4.1, 34.82]}
+    x = ET.fromstring(rekordbox.build([t], [("Set", [3, 99])]))
+    tr = x.find("COLLECTION/TRACK")
+    assert tr.get("Tonality") == "Am" and tr.get("AverageBpm") == "125.00" and tr.get("Rating") == "204"
+    assert tr.get("Location") == "file://localhost/music/a%20b.mp3"
+    tempo = tr.find("TEMPO")
+    assert 0 <= float(tempo.get("Inizio")) < 1.92 and abs((4.1 - float(tempo.get("Inizio"))) % 1.92) < 1e-3
+    hot = [m for m in tr.findall("POSITION_MARK") if m.get("Num") != "-1"]
+    assert [m.get("Num") for m in hot] == ["0", "1"]
+    pl = x.find("PLAYLISTS/NODE/NODE/NODE")
+    assert pl.get("Name") == "Set" and pl.get("Entries") == "1"

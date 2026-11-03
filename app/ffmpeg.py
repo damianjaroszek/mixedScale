@@ -75,13 +75,14 @@ def decode(path: str, sr: int = 22050, mono: bool = True) -> np.ndarray:
     return data
 
 
-def pitch_tempo_filter(semitones: float = 0.0, tempo: float = 1.0, sr: int = 44100) -> str | None:
-    """Filter chain that shifts pitch by `semitones` and speeds up by `tempo` independently."""
+def pitch_tempo_filter(semitones: float = 0.0, tempo: float = 1.0, sr: int = 44100, fast: bool = False) -> str | None:
+    """Filter chain that shifts pitch by `semitones` and speeds up by `tempo` independently.
+    fast=True (deck preview) is ~1/3 quicker; exports always use the highest quality."""
     if abs(semitones) < 1e-6 and abs(tempo - 1.0) < 1e-6:
         return None
     ratio = 2.0 ** (semitones / 12.0)
     if has_rubberband():
-        return f"rubberband=pitch={ratio:.6f}:tempo={tempo:.6f}:pitchq=quality:transients=crisp:window=standard"
+        return f"rubberband=pitch={ratio:.6f}:tempo={tempo:.6f}:pitchq={'speed' if fast else 'quality'}:transients=crisp:window=standard"
     # Fallback: resample (changes pitch+tempo) then fix tempo with atempo.
     chain = []
     if abs(ratio - 1.0) > 1e-6:
@@ -105,9 +106,9 @@ CODECS = {
 }
 
 
-def render(src: str, dst: str, semitones: float = 0.0, tempo: float = 1.0, sr: int = 44100) -> str:
+def render(src: str, dst: str, semitones: float = 0.0, tempo: float = 1.0, sr: int = 44100, fast: bool = False) -> str:
     args = ["-i", src, "-vn", "-ar", str(sr), "-ac", "2"]
-    flt = pitch_tempo_filter(semitones, tempo, sr)
+    flt = pitch_tempo_filter(semitones, tempo, sr, fast)
     if flt:
         args += ["-af", flt]
     args += CODECS[os.path.splitext(dst)[1].lower()]

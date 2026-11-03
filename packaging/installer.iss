@@ -1,4 +1,7 @@
 ; Inno Setup script: builds Blendora-Setup-<version>.exe from dist\Blendora
+#ifndef Edition
+  #define Edition ""
+#endif
 #ifndef AppVersion
   #define AppVersion "0.1.0"
 #endif
@@ -14,7 +17,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\dist
-OutputBaseFilename=Blendora-Setup-{#AppVersion}
+OutputBaseFilename=Blendora{#Edition}-Setup-{#AppVersion}
 SetupIconFile=blendora.ico
 UninstallDisplayIcon={app}\Blendora.exe
 Compression=lzma2/max

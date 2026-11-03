@@ -8,7 +8,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -282,6 +284,7 @@ class TrackPatch(BaseModel):
     first_downbeat: float | None = None
     beat_offset: float | None = None
     cues: list[float] | None = None
+    key_manual: int | None = None
     write_file: bool = False
 
 
@@ -293,7 +296,7 @@ def patch_track(tid: int, p: TrackPatch):
         fields["key"] = fields["key"].upper()
         camelot.parse_camelot(fields["key"])
         fields["key_name"] = camelot.standard_name(fields["key"])
-        fields["key_manual"] = 1
+        fields.setdefault("key_manual", 1)
     if "cues" in fields:
         fields["cues"] = sorted(round(max(0.0, c), 3) for c in fields["cues"])[:8]
     if "bpm" in fields and not 40 <= fields["bpm"] <= 250:
@@ -375,7 +378,12 @@ def _source_for(t: dict, stem: str) -> str:
     return str(stems.stem_path(CACHE, t["id"], stem))
 
 
-def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac") -> str:
+_inflight: dict[str, threading.Event] = {}
+_inflight_lock = threading.Lock()
+_prefetch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+
+
+def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac", fast: bool = False) -> str:
     if stem not in STEM_CHOICES:
         raise HTTPException(400, "Zły stem")
     if not -12 <= semitones <= 12 or not 0.5 <= tempo <= 2.0:
@@ -389,17 +397,65 @@ def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac
     rdir = CACHE / "render"
     rdir.mkdir(parents=True, exist_ok=True)
     tag = hashlib.md5(f"{src}|{os.path.getmtime(src)}".encode()).hexdigest()[:8]
-    dst = rdir / f"{t['id']}_{stem}_{semitones:+d}_{tempo:.5f}_{tag}{ext}"
-    if not dst.exists():
-        ffmpeg.render(src, str(dst), semitones, tempo)
-    return str(dst)
+    dst = rdir / f"{t['id']}_{stem}_{semitones:+d}_{tempo:.5f}_{tag}{'_p' if fast else ''}{ext}"
+    # a high-quality render can always stand in for a preview one, not the other way round
+    if fast and (hq := rdir / dst.name.replace("_p" + ext, ext)).exists():
+        return str(hq)
+    key = str(dst)
+    while True:
+        if dst.exists():
+            return key
+        with _inflight_lock:
+            ev = _inflight.get(key)
+            if ev is None:
+                ev = _inflight[key] = threading.Event()
+                mine = True
+            else:
+                mine = False
+        if not mine:
+            ev.wait(600)  # the same variant is already being rendered (e.g. prefetched): reuse it
+            continue
+        try:
+            ffmpeg.render(src, key, semitones, tempo, fast=fast)
+        finally:
+            with _inflight_lock:
+                _inflight.pop(key, None)
+            ev.set()
+        return key
 
 
 @app.get("/api/tracks/{tid}/audio")
 def track_audio(tid: int, stem: str = "full", semitones: int = 0, tempo: float = 1.0):
     t = _track_or_404(tid)
-    path = _variant(t, stem, semitones, round(tempo, 5))
+    path = _variant(t, stem, semitones, round(tempo, 5), fast=True)
     return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+
+class PrefetchReq(BaseModel):
+    stem: str = "full"
+    semitones: list[int] = []
+    tempo: float = 1.0
+    deck: str = "A"
+
+
+_prefetch_gen: dict[str, int] = {}
+
+
+@app.post("/api/tracks/{tid}/prefetch")
+def prefetch(tid: int, req: PrefetchReq):
+    """Render likely next variants (neighbouring keys at the current tempo) in the background,
+    so a key change on the deck is instant."""
+    t = _track_or_404(tid)
+    gen = _prefetch_gen[req.deck] = _prefetch_gen.get(req.deck, 0) + 1
+
+    def job(s: int):
+        if _prefetch_gen.get(req.deck) == gen:  # skip if the deck has moved on to another track/tempo
+            _variant(t, req.stem, s, round(req.tempo, 5), fast=True)
+
+    for s in req.semitones[:4]:
+        if -12 <= s <= 12:
+            _prefetch_pool.submit(job, s)
+    return {"queued": len(req.semitones[:4])}
 
 
 @app.post("/api/tracks/{tid}/stems")
@@ -643,6 +699,17 @@ def playlist_m3u_save(pid: int):
     dst = _export_dir() / f"{_safe_name(p['name'])}.m3u8"
     dst.write_text(playlist_m3u(pid).body.decode(), encoding="utf-8")
     return {"path": str(dst)}
+
+
+@app.post("/api/export/rekordbox")
+def export_rekordbox():
+    """Whole analysed library + all playlists as rekordbox XML in the export folder."""
+    from . import rekordbox
+    tracks = db.q(f"SELECT {TRACK_COLS} FROM tracks WHERE status = 'done'")
+    pls = [(p["name"], playlist_tracks(p["id"])) for p in db.q("SELECT id, name FROM playlists ORDER BY sort, id")]
+    dst = _export_dir() / "blendora_rekordbox.xml"
+    dst.write_bytes(rekordbox.build(tracks, pls))
+    return {"path": str(dst), "tracks": len(tracks), "playlists": len(pls)}
 
 
 # ---------------------------------------------------------------- saved mashups

@@ -155,10 +155,22 @@ export function renderSettings(app) {
       row("Równoległe analizy", f.analysis_workers, "Więcej = szybciej, ale większe obciążenie komputera."),
       row("Zakres tempa", f.bpm_range, "Tempo jest podwajane / dzielone na pół, żeby trafić w ten zakres. Zmiana działa od razu, bez ponownej analizy."),
       h("span"), h("div", {}, save)),
+    h("h3", {}, "Eksport do innych programów DJ"),
+    h("div", { class: "settings-grid" },
+      row("Rekordbox", h("div", {}, h("button", { class: "btn", onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        try {
+          const r = await api.post("/api/export/rekordbox");
+          toast(`Zapisano ${r.tracks} utworów i ${r.playlists} playlist: ${r.path}`, { ms: 9000 });
+        } catch (err) { toast(err.message, { error: true }); }
+        e.target.disabled = false;
+      } }, "Zapisz bibliotekę jako rekordbox XML")),
+        "BPM z siatką, tonacja, ocena, komentarz, hot cue A–H i playlisty. W Rekordbox: Preferencje → Zaawansowane → Baza danych → rekordbox xml, wskaż plik, potem w drzewie „rekordbox xml” przeciągnij utwory do kolekcji."),
+      row("Serato, Traktor, VirtualDJ", h("span", {}, "Włącz „Wpisuj tonację do tagów po analizie”. Te programy czytają tonację i BPM z tagów pliku."))),
     h("h3", {}, "Silniki"),
     h("div", { class: "settings-grid" },
       row("Zmiana tonacji / tempa", h("span", {}, st.rubberband ? "Rubber Band (wysoka jakość)" : "ffmpeg asetrate/atempo (zainstaluj ffmpeg z Rubber Band dla lepszej jakości)")),
-      row("Separacja stemów", h("span", {}, st.demucs ? "Demucs zainstalowany" : "Brak Demucs: szybki podgląd. Uruchom: pip install -r requirements-stems.txt")),
+      row("Separacja stemów", h("span", {}, st.demucs ? "Demucs (wysoka jakość)" : "Szybki podgląd (niska jakość). Pełną jakość daje wersja Blendora Pro albo: pip install -r requirements-stems.txt")),
       row("Folder danych", h("span", { class: "muted" }, st.home || ""))),
   ));
 }
@@ -254,6 +266,7 @@ export function helpModal() {
       row("Shift + 1 – 8", "Skok do cue na decku B"),
       row("L / K", "Pętla na decku A / B"),
       row("C / Shift + C", "Dodaj cue w najbliższym beacie na decku A / B"),
+      row("Ctrl + Z", "Cofnij ostatnią zmianę cue, siatki lub tonacji"),
       row("‹ ›  (przytrzymaj)", "Chwilowo zwolnij / przyspiesz deck, żeby dograć fazę na ucho"),
       row("▦ Siatka", "Popraw BPM (×2, ÷2), „Beat tutaj”, „Raz tutaj”, przesuń lub usuń cue"),
       row("Dwuklik", "Wczytaj do decku A (z Shift: do decku B)"))),

@@ -419,7 +419,8 @@ class App {
     window.addEventListener("keydown", (e) => {
       if (e.target.closest("input,textarea,select") || document.querySelector(".modal-back")) return;
       const A = this.decks.A, B = this.decks.B;
-      if (e.code === "Space") { e.preventDefault(); this.testMashup(); }
+      if (e.code === "KeyZ" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); return; }
+      else if (e.code === "Space") { e.preventDefault(); this.testMashup(); }
       else if (e.code === "KeyQ") A.toggle();
       else if (e.code === "KeyW") B.toggle();
       else if (e.code === "ArrowRight") { e.preventDefault(); this.gotoIdea(this.ideaIdx + 1); }
@@ -432,6 +433,23 @@ class App {
       this.syncTestButton();
     });
     setInterval(() => this.syncTestButton(), 500);
+  }
+
+  // ------------------------------------------------------------------ undo for cue / grid / key edits
+  pushUndo(entry) {
+    (this.undoStack ||= []).push(entry);
+    if (this.undoStack.length > 50) this.undoStack.shift();
+  }
+
+  async undo() {
+    const e = this.undoStack?.pop();
+    if (!e) { toast("Nie ma nic do cofnięcia"); return; }
+    const deck = [this.decks.A, this.decks.B].find((d) => d.track?.id === e.id);
+    if (deck) await deck.saveGrid(e.fields, `Cofnięto: ${e.label}`, { undo: false });
+    else {
+      try { this.updateTrack(await api.patch(`/api/tracks/${e.id}`, e.fields)); toast(`Cofnięto: ${e.label}`); }
+      catch (err) { toast(err.message, { error: true }); }
+    }
   }
 
   syncTestButton() {

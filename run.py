@@ -84,12 +84,13 @@ def main():
     ap.add_argument("--browser", action="store_true", help="otwórz w przeglądarce zamiast w oknie aplikacji")
     ap.add_argument("--no-browser", "--server", dest="server_only", action="store_true", help="tylko serwer")
     ap.add_argument("--selftest", action="store_true", help="sprawdź analizę audio i zakończ")
+    ap.add_argument("--selftest-stems", action="store_true", help="sprawdź separację stemów (Demucs) i zakończ")
     args = ap.parse_args()
 
-    if args.selftest:
-        from app.selftest import run
+    if args.selftest or args.selftest_stems:
+        from app.selftest import run, run_stems
 
-        sys.exit(0 if run() else 1)
+        sys.exit(0 if (run_stems() if args.selftest_stems else run()) else 1)
 
     port = free_port(args.port)
     url = f"http://127.0.0.1:{port}"
@@ -111,4 +112,10 @@ if __name__ == "__main__":
     import multiprocessing
 
     multiprocessing.freeze_support()
+    if len(sys.argv) > 1 and sys.argv[1] == "--demucs":
+        # Pro build: the exe doubles as the Demucs command line (stem separation runs in a child process)
+        from demucs.separate import main as demucs_main
+
+        demucs_main(sys.argv[2:])
+        sys.exit(0)
     main()

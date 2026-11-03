@@ -22,13 +22,39 @@ STEMS = ("vocals", "instrumental")
 
 
 def demucs_command() -> list[str] | None:
-    """How to launch Demucs: the bundled module (dev install) or a `demucs` CLI on PATH."""
+    """How to launch Demucs: the Pro exe runs it itself (`Blendora.exe --demucs ...`), a dev
+    install uses the module, otherwise a `demucs` CLI on PATH."""
     if os.environ.get("BLENDORA_STEMS", "") == "quick":
         return None
-    if not getattr(sys, "frozen", False) and importlib.util.find_spec("demucs") is not None:
-        return [sys.executable, "-m", "demucs"]
+    if importlib.util.find_spec("demucs") is not None:
+        return [sys.executable, "--demucs"] if getattr(sys, "frozen", False) else [sys.executable, "-m", "demucs"]
     cli = shutil.which("demucs")
     return [cli] if cli else None
+
+
+def bundled_models() -> Path | None:
+    """Model files shipped with the Pro build (HuggingFace cache layout)."""
+    base = getattr(sys, "_MEIPASS", None)
+    p = Path(base) / "models" / "hf" if base else None
+    return p if p and p.is_dir() else None
+
+
+def demucs_env() -> dict:
+    """Demucs calls `ffmpeg` by name and keeps models in the HuggingFace cache: point both at ours."""
+    from .db import HOME
+
+    env = dict(os.environ)
+    ff = ffmpeg.ffmpeg_bin()
+    if ff and os.path.isabs(ff):
+        env["PATH"] = os.path.dirname(ff) + os.pathsep + env.get("PATH", "")
+    hf = HOME / "models" / "hf"
+    src = bundled_models()
+    if src and not (hf / "hub").exists():
+        shutil.copytree(src, hf, dirs_exist_ok=True)  # once: the install folder may be read-only
+    if src or (hf / "hub").exists():
+        env["HF_HOME"] = str(hf)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
 
 
 def demucs_available() -> bool:
@@ -50,7 +76,8 @@ def has_stems(cache: Path, track_id: int) -> bool:
 def _separate_demucs(src: str, out: Path, model: str, progress=None) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [*demucs_command(), "--two-stems=vocals", "-n", model, "-o", tmp, "--filename", "{stem}.{ext}", "--flac", src]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1, **ffmpeg.NO_WINDOW)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=demucs_env(),
+                                text=True, encoding="utf-8", errors="replace", bufsize=1, **ffmpeg.NO_WINDOW)
         tail = []
         buf = ""
         while True:

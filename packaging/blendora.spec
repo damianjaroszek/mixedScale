@@ -18,6 +18,17 @@ hiddenimports = collect_submodules("librosa") + collect_submodules("uvicorn") + 
 if WIN:
     hiddenimports += ["webview.platforms.edgechromium", "webview.platforms.winforms", "clr"]
 
+PRO = os.environ.get("BLENDORA_PRO") == "1"  # Pro edition: bundles PyTorch + Demucs for high quality stems
+excludes = ["tkinter", "matplotlib", "IPython", "pytest"]
+if PRO:
+    datas += collect_data_files("demucs")
+    hiddenimports += collect_submodules("demucs") + ["sphn", "lameenc", "julius", "einops", "safetensors", "huggingface_hub", "yaml"]
+    models = os.environ.get("BLENDORA_BUNDLE_MODELS")  # pre-downloaded HuggingFace cache with htdemucs
+    if models and os.path.isdir(models):
+        datas.append((models, os.path.join("models", "hf")))
+else:
+    excludes += ["torch", "torchaudio", "demucs", "triton"]
+
 binaries = []
 ff = os.environ.get("BLENDORA_BUNDLE_FFMPEG")  # path to ffmpeg(.exe) with Rubber Band, copied next to the exe
 if ff and os.path.isfile(ff):
@@ -29,7 +40,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["torch", "torchaudio", "demucs", "triton", "tkinter", "matplotlib", "IPython", "pytest"],
+    excludes=excludes,
     noarchive=False,
 )
 pyz = PYZ(a.pure)

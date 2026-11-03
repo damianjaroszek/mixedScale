@@ -172,6 +172,13 @@ export class Deck {
     api.get(`/api/tracks/${id}/vocals`).then((v) => { if (this.track?.id === id) { this.vocals = v; this.draw(); } }).catch(() => {});
   }
 
+  // render neighbouring keys in the background so the next key change is instant
+  prefetchNeighbours() {
+    const { stem, semitones, tempo } = this.params;
+    const want = [1, -1, 2, -2].map((d) => semitones + d).filter((s) => s >= -4 && s <= 4);
+    api.post(`/api/tracks/${this.track.id}/prefetch`, { stem, semitones: want, tempo, deck: this.name }).catch(() => {});
+  }
+
   async loadVariant() {
     if (!this.track) return;
     const token = ++this.loadToken;
@@ -186,6 +193,7 @@ export class Deck {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
       const buf = await ctx.decodeAudioData(await r.arrayBuffer());
       if (token !== this.loadToken) return;
+      this.prefetchNeighbours();
       if (wasPlaying && this.playing) {
         // seamless swap: keep the musical position (and so the phase against the other deck)
         const lead = 0.04;
@@ -549,8 +557,13 @@ export class Deck {
   }
 
   // ------------------------------------------------------------------ manual beat grid / cue editing
-  async saveGrid(fields, msg) {
+  async saveGrid(fields, msg, { undo = true } = {}) {
     const t = this.track;
+    if (undo) {
+      const old = {};
+      for (const k of Object.keys(fields)) old[k] = Array.isArray(t[k]) ? [...t[k]] : t[k];
+      this.app.pushUndo({ id: t.id, fields: old, label: msg || "Zmiana siatki" });
+    }
     try {
       const fresh = await api.patch(`/api/tracks/${t.id}`, fields);
       this.app.updateTrack(fresh);
@@ -636,7 +649,7 @@ export class Deck {
     if (i >= c.length) return;
     c.splice(i, 1);
     this.selCue = Math.max(0, Math.min(this.selCue, c.length - 1));
-    this.saveGrid({ cues: c }, "Cue usunięty");
+    return this.saveGrid({ cues: c }, "Cue usunięty");
   }
 
   setZoom(z) { this.zoom = Math.max(0, Math.min(ZOOM_BARS.length - 1, z)); this.draw(); }
