@@ -60,6 +60,20 @@ def analyze_job(path: str, learned: dict | None, bpm_range: tuple[float, float])
     return res, wave
 
 
+def warmup() -> bool:
+    """Compile and cache librosa's numba kernels in ONE worker before the others start, so several
+    processes never write the same on-disk numba cache at once (first run after install)."""
+    import tempfile
+
+    from .synth import make_track
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "warmup.wav")
+        make_track(p, "A", "minor", 124, bars=8)
+        analyze_job(p, None, (78, 180))
+    return True
+
+
 def worker_count(setting) -> int:
     try:
         n = int(setting or 0)
@@ -90,6 +104,7 @@ class Analyzer(threading.Thread):
         self.running: dict[int, object] = {}
         self.pool = None
         self.pool_size = 0
+        self.warmed = False
 
     @property
     def current(self):
@@ -107,6 +122,11 @@ class Analyzer(threading.Thread):
 
             self.pool = ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn"))
             self.pool_size = n
+            if n > 1 and not self.warmed:
+                try:
+                    self.warmed = self.pool.submit(warmup).result(timeout=600)
+                except Exception:
+                    traceback.print_exc()
 
     def run(self):
         while True:
