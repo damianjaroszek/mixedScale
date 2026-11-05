@@ -170,6 +170,96 @@ def _comb_fit(env: np.ndarray, fps: float, bpm0: float, span: float, step: float
     return best
 
 
+def _attack_times(y: np.ndarray, sr: int, beats: np.ndarray, win: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    """Precise kick attack time near each predicted beat: where the low-band (<160 Hz) energy
+    first reaches half of its jump (ms accuracy, no STFT frame bias). A sustained sub bass or
+    drone is ignored because it does not jump. Returns (times, strength)."""
+    from scipy.signal import butter, sosfiltfilt
+
+    sos = butter(4, 160, btype="low", fs=sr, output="sos")
+    lo = sosfiltfilt(sos, y)
+    k = max(1, int(0.012 * sr))  # >= one ripple period of a 40 Hz bass, centred
+    env = np.convolve(lo * lo, np.ones(k) / k, mode="same")
+    w, pre0, pre1 = int(win * sr), int(0.075 * sr), int(0.02 * sr)
+    times, strength = np.full(len(beats), np.nan), np.zeros(len(beats))
+    for i, b in enumerate(beats):
+        c = int(b * sr)
+        a0, a1 = max(0, c - w), min(len(env), c + w)
+        if a1 - a0 < w:
+            continue
+        seg = env[a0:a1]
+        pk = int(np.argmax(seg))
+        p_abs = a0 + pk
+        before = env[max(0, p_abs - pre0) : max(1, p_abs - pre1)]
+        base = float(np.median(before)) if len(before) else 0.0
+        peak = float(seg[pk])
+        if peak <= 1e-9 or peak < 2.5 * (base + 1e-12):
+            continue  # nothing hits here (or only a sustained bass)
+        thr = base + 0.5 * (peak - base)
+        j = int(np.argmax(seg[: pk + 1] >= thr))
+        times[i] = (a0 + j) / sr
+        strength[i] = np.sqrt(peak) - np.sqrt(base)
+    return times, strength
+
+
+def _tempo_steady(env: np.ndarray, fps: float, hop: int, sr: int, bpm: float) -> bool:
+    """Does the tempo stay constant? Local tempo over 32-beat windows of a beat tracker that is
+    free to follow tempo changes (live drums, old records, DJ edits with a tempo ramp)."""
+    try:
+        _, bt = librosa.beat.beat_track(onset_envelope=env, sr=sr, hop_length=hop, bpm=bpm, tightness=100, units="time")
+    except Exception:
+        return True
+    if len(bt) < 80:
+        return True
+    period = 60.0 / bpm
+    ioi = np.diff(bt)
+    local = []
+    for i in range(0, len(bt) - 33, 16):
+        if np.all(np.abs(ioi[i : i + 32] / period - 1) < 0.25):
+            local.append(32 / (bt[i + 32] - bt[i]))
+    if len(local) < 4:
+        return True
+    local = np.array(local)
+    return float((np.percentile(local, 90) - np.percentile(local, 10)) / np.median(local)) < 0.004
+
+
+def _fit_grid(y: np.ndarray, sr: int, bpm: float, phase: float, tol: float = 0.012) -> tuple[float, float, float, dict]:
+    """Robust straight-line fit of the beat grid to the real kick attacks over the whole track.
+    Returns (bpm, phase, rms residual s, info) — info tells whether the tempo is steady."""
+    period = 60.0 / bpm
+    dur = len(y) / sr
+    beats = phase + np.arange(int((dur - phase) / period)) * period
+    t, st = _attack_times(y, sr, beats)
+    ok = ~np.isnan(t)
+    if ok.sum() < 16:
+        return bpm, phase, 1.0, {"steady": True, "used": int(ok.sum())}
+    ok &= st > 0.25 * np.percentile(st[ok], 90)
+    idx = np.arange(len(beats))
+    for _ in range(4):
+        if ok.sum() < 16:
+            break
+        A = np.vstack([np.ones(ok.sum()), idx[ok]]).T
+        (p0, per), *_ = np.linalg.lstsq(A, t[ok], rcond=None)
+        res = t - (p0 + per * idx)
+        mad = np.nanmedian(np.abs(res[ok])) + 1e-4
+        ok &= np.abs(res) < max(tol, 3 * mad)
+    A = np.vstack([np.ones(ok.sum()), idx[ok]]).T
+    (p0, per), *_ = np.linalg.lstsq(A, t[ok], rcond=None)
+    rms = float(np.sqrt(np.mean((t[ok] - (p0 + per * idx[ok])) ** 2)))
+    # steady tempo? compare the first and second half of the track
+    steady = True
+    h = idx[ok]
+    if len(h) > 64:
+        mid = np.median(h)
+        pers = []
+        for m in (h < mid, h >= mid):
+            if m.sum() > 16:
+                pers.append(np.polyfit(h[m], t[ok][m], 1)[0])
+        if len(pers) == 2 and abs(pers[0] - pers[1]) / per > 0.0015:
+            steady = False
+    return 60.0 / per, float(p0 % per), rms, {"steady": steady, "used": int(ok.sum())}
+
+
 def detect_tempo(y: np.ndarray, sr: int = SR, bpm_range: tuple[float, float] = (78.0, 180.0)) -> dict:
     hop = 256
     fps = sr / hop
@@ -193,6 +283,19 @@ def detect_tempo(y: np.ndarray, sr: int = SR, bpm_range: tuple[float, float] = (
     low_env = librosa.onset.onset_strength(S=librosa.power_to_db(mel[mel_f < 180]), sr=sr, hop_length=hop)
     low_env = low_env / (low_env.max() + 1e-9)
     _, phase, _ = _comb_fit(low_env + 0.3 * env[: len(low_env)], fps, bpm, 0.0, 1.0)
+    # precise grid from the real kick attacks (fixes slow drift and the onset-detector lag)
+    steady = _tempo_steady(env, fps, hop, sr, bpm)
+    bpm_f, phase_f, rms, info = _fit_grid(y, sr, bpm, max(0.0, phase - hop / sr), tol=0.012 if steady else 0.06)
+    if info["used"] >= 32 and abs(bpm_f - bpm) < 0.5:
+        steady = steady and info["steady"]
+        bpm_r = round(bpm_f * 2) / 2
+        if abs(bpm_r - bpm_f) < 0.03:  # produced at an integer / .5 BPM? keep it if it fits as well
+            b2, p2, rms2, _ = _fit_grid(y, sr, bpm_r, phase_f)
+            per_r = 60.0 / bpm_r
+            n = (len(y) / sr) / per_r
+            if abs(b2 - bpm_r) * n * per_r / bpm_r < 0.004:
+                bpm_f, phase_f = bpm_r, p2
+        bpm, phase = float(bpm_f), float(phase_f) + hop / sr  # (phase gets the lag removed below)
     period = 60.0 / bpm
     # downbeat: beat-in-bar position with the strongest low-band + harmonic change
     S = np.abs(librosa.stft(y, n_fft=2048, hop_length=HOP))
@@ -225,7 +328,8 @@ def detect_tempo(y: np.ndarray, sr: int = SR, bpm_range: tuple[float, float] = (
     # onset envelopes peak about one hop after the attack
     first_downbeat = max(0.0, phase + best * period - hop / sr)
     phase = max(0.0, phase - hop / sr)
-    return {"bpm": round(bpm, 3), "beat_offset": round(float(phase), 4), "first_downbeat": round(float(first_downbeat), 4)}
+    return {"bpm": round(bpm, 4), "beat_offset": round(float(phase), 4), "first_downbeat": round(float(first_downbeat), 4),
+            "tempo_steady": bool(steady)}
 
 
 def _energy_raw(db_active: float, onset_rate: float, centroid: float, bpm: float) -> float:
@@ -241,15 +345,31 @@ def to_level(raw: float) -> int:
 
 
 def _beat_kicks(y: np.ndarray, sr: int, beats: np.ndarray) -> np.ndarray:
-    """Kick strength on each beat: low-band (<150 Hz) onset peak within +-35 ms of the beat."""
-    hop = 256
-    mel = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=hop, n_mels=64, fmax=8000)
-    mel_f = librosa.mel_frequencies(n_mels=64, fmax=8000)
-    # linear magnitude flux: a kick is a big burst of low-end energy even under a sustained bassline
-    low = librosa.onset.onset_strength(S=np.sqrt(mel[mel_f < 150]), sr=sr, hop_length=hop, lag=1, max_size=1)
-    fr = librosa.time_to_frames(beats, sr=sr, hop_length=hop) + 1  # onset peaks ~1 hop after the attack
-    w = max(1, int(0.035 * sr / hop))
-    return np.array([low[max(0, f - w) : f + w + 1].max() if f < len(low) else 0.0 for f in fr])
+    """Kick strength on each beat: how sharply the low end (<160 Hz) jumps right at the beat.
+    A sustained bassline or pad in a breakdown gives ~0, a kick gives a clear attack."""
+    _, st = _attack_times(y, sr, beats, win=0.04)
+    return st
+
+
+def _kick_threshold(k: np.ndarray) -> float:
+    """Split beats into 'kick' / 'no kick' (Otsu on log strength), never below 20% of a loud kick."""
+    ref = float(np.percentile(k, 90)) if len(k) else 1.0
+    v = np.log(k[k > 1e-6] + 1e-9)
+    if len(v) < 16:
+        return 0.35 * ref
+    hist, edges = np.histogram(v, bins=40)
+    centers = (edges[:-1] + edges[1:]) / 2
+    best, thr = -1.0, float(np.median(v))
+    for i in range(1, len(hist)):
+        w0, w1 = hist[:i].sum(), hist[i:].sum()
+        if not w0 or not w1:
+            continue
+        m0 = (hist[:i] * centers[:i]).sum() / w0
+        m1 = (hist[i:] * centers[i:]).sum() / w1
+        between = w0 * w1 * (m0 - m1) ** 2
+        if between > best:
+            best, thr = between, float(edges[i])
+    return max(float(np.exp(thr)), 0.2 * ref)
 
 
 def _runs(state: np.ndarray) -> list[tuple[bool, int, int]]:
@@ -289,11 +409,13 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
     beat = 60.0 / bpm
     bar = 4 * beat
     # --- kick on every beat of the grid ---
-    b0 = first_downbeat - math.floor(first_downbeat / beat) * beat  # first beat >= 0
+    b0 = first_downbeat - math.floor(first_downbeat / beat + 0.03) * beat  # first beat (>= -1 ms)
+    b0 = max(b0, 0.0)
     beats = np.arange(b0, dur - 0.05, beat)
     kicks = _beat_kicks(y, sr, beats)
-    ref = np.percentile(kicks, 90) if len(kicks) else 1.0
-    has_kick = kicks > 0.35 * (ref + 1e-9)
+    kthr = _kick_threshold(kicks)
+    has_kick = kicks > kthr
+    soft_kick = kicks > 0.5 * kthr  # the first kick of a drop can be masked by the riser/drone tail
     # beat index of the first downbeat
     d0 = int(round((first_downbeat - b0) / beat))
 
@@ -315,7 +437,7 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
                 ev.append(("out", last + 1, e0 - s0))
             if e0 < nbar:  # kick returns: the first kick beat
                 first = phase + e0 * 4 - 4
-                while first < len(has_kick) - 1 and not (has_kick[first] and has_kick[first + 1: first + 3].any()):
+                while first < len(has_kick) - 1 and not (soft_kick[first] and has_kick[first + 1: first + 3].any()):
                     first += 1
                 ev.append(("in", first, e0 - s0))
         return ev, kb, nbar
@@ -335,7 +457,7 @@ def analyze_structure(y: np.ndarray, bpm: float, first_downbeat: float, sr: int 
 
     # --- bar features (bars start on the downbeat) ---
     start = first_downbeat
-    while start - bar >= -1e-6:
+    while start - bar >= -0.01:
         start -= bar
     start = max(0.0, start)
     edges = np.arange(start, dur + bar, bar)

@@ -65,6 +65,7 @@ MIGRATIONS = [
     "ALTER TABLE tracks ADD COLUMN key_features TEXT",
     "ALTER TABLE tracks ADD COLUMN tag_key TEXT",
     "ALTER TABLE tracks ADD COLUMN key_manual INTEGER DEFAULT 0",
+    "ALTER TABLE tracks ADD COLUMN tempo_steady INTEGER DEFAULT 1",
 ]
 
 

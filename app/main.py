@@ -258,7 +258,7 @@ async def import_upload(files: list[UploadFile] = File(...)):
 
 
 # ---------------------------------------------------------------- tracks
-TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, key2, tag_key, key_manual, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
+TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, key2, tag_key, key_manual, tempo_steady, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
 
 
 @app.get("/api/tracks")

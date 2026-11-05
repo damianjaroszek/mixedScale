@@ -164,6 +164,7 @@ class Analyzer(threading.Thread):
             wp.parent.mkdir(parents=True, exist_ok=True)
             wp.write_text(json.dumps(wave))
             fields = {k: res[k] for k in ("duration", "key", "key_name", "key_confidence", "key2", "key_features", "bpm", "beat_offset", "first_downbeat", "energy", "cues", "segments")}
+            fields["tempo_steady"] = 1 if res.get("tempo_steady", True) else 0
             fields.update(status="done", analyzed_at=time.time(), key_manual=0)
             self.db.update("tracks", tid, fields)
             settings = self.db.settings()

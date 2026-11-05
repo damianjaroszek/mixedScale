@@ -241,3 +241,4 @@ table.grid { width: 100%; border-collapse: collapse; }
 .conf > i { display: block; height: 100%; background: var(--accent); }
 .wave-box { touch-action: none; }
 .wave-box.grid-edit { cursor: ew-resize; box-shadow: inset 0 0 0 2px var(--warn); }
+.tempo-warn { color: var(--warn); font-size: 11px; cursor: help; }

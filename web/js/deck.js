@@ -131,8 +131,9 @@ export class Deck {
     const kn = t && t.key ? this.app.keyInfo(this.key).name : "";
     this.keyName.replaceChildren(kn, this.params.semitones ? h("span", { class: "shifted" }, ` (${this.params.semitones > 0 ? "+" : ""}${this.params.semitones})`) : "");
     const bpm = t ? t.bpm : 0;
-    this.bpmEl.replaceChildren("Tempo ", h("b", {}, bpm ? (+bpm.toFixed(1)).toString() : "–"),
-      Math.abs(this.params.tempo - 1) > 1e-4 ? h("span", { class: "shifted" }, ` → ${this.bpm.toFixed(1)}`) : "");
+    this.bpmEl.replaceChildren("Tempo ", h("b", {}, bpm ? (+bpm.toFixed(2)).toString() : "–"),
+      Math.abs(this.params.tempo - 1) > 1e-4 ? h("span", { class: "shifted" }, ` → ${this.bpm.toFixed(2)}`) : "",
+      t && t.tempo_steady === 0 ? h("span", { class: "tempo-warn", title: "Tempo w tym utworze się zmienia (np. nagranie na żywo). Stała siatka i Sync mogą się z czasem rozjeżdżać — używaj ‹ › do korekty." }, " ⚠ zmienne") : "");
     this.energyEl.replaceChildren("Energia ", h("b", {}, t?.energy ?? "–"));
     this.keyBtn.classList.toggle("on", !!this.params.semitones);
     this.stemBtn.replaceChildren("≋ " + (this.params.stem === "full" ? "Stemy" : STEM_NAMES[this.params.stem]));
