@@ -9,7 +9,7 @@ import math
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import camelot
 
@@ -93,3 +93,54 @@ def build(tracks: list[dict], playlists: list[tuple[str, list[int]]]) -> bytes:
     ET.SubElement(root, "INDEXING")
     ET.indent(root)
     return b'<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n' + ET.tostring(root, encoding="utf-8")
+
+
+def find_collections() -> list[Path]:
+    """Traktor's collection.nml files on this computer, newest first."""
+    home = Path.home()
+    pats = [home / "Documents" / "Native Instruments", *[p / "Documents" / "Native Instruments" for p in home.glob("OneDrive*")]]
+    found = []
+    for base in pats:
+        if base.is_dir():
+            found += [p for p in base.glob("Traktor*/collection.nml") if p.is_file()]
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def location_path(volume: str, d: str, f: str) -> str:
+    parts = [x for x in d.split("/:") if x]
+    if len(volume) == 2 and volume[1] == ":":  # Windows drive
+        return str(PureWindowsPath(volume + "\\", *parts, f))
+    return str(PurePosixPath("/", *parts, f))
+
+
+def from_key_value(v: int) -> str | None:
+    if not 0 <= v <= 23:
+        return None
+    return camelot.to_camelot(v % 12, "minor" if v >= 12 else "major")
+
+
+def read_collection(path: str) -> dict[str, dict]:
+    """{file path: {'bpm', 'grid' (s, first beat-grid marker), 'key' (Camelot)}} from collection.nml."""
+    out = {}
+    root = ET.parse(path).getroot()
+    for e in root.iter("ENTRY"):
+        loc = e.find("LOCATION")
+        if loc is None or not loc.get("FILE"):
+            continue
+        p = location_path(loc.get("VOLUME", ""), loc.get("DIR", ""), loc.get("FILE"))
+        d: dict = {}
+        tempo = e.find("TEMPO")
+        if tempo is not None and tempo.get("BPM"):
+            try:
+                d["bpm"] = round(float(tempo.get("BPM")), 4)
+            except ValueError:
+                pass
+        grids = [c for c in e.findall("CUE_V2") if c.get("TYPE") == "4" and c.get("START")]
+        if grids:
+            d["grid"] = round(float(grids[0].get("START")) / 1000.0, 4)
+        mk = e.find("MUSICAL_KEY")
+        if mk is not None and mk.get("VALUE", "").isdigit():
+            d["key"] = from_key_value(int(mk.get("VALUE")))
+        if d:
+            out[p] = d
+    return out

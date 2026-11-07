@@ -287,3 +287,48 @@ def test_four_stems_mute_mix(client):
     assert client.get(f"/api/tracks/{t['id']}/audio", params={"stem": "mute:drums,bass,other,vocals"}).status_code == 400
     w = client.get(f"/api/tracks/{t['id']}/stemwave").json()
     assert set(w) >= {"pps", "drums", "bass", "other", "vocals"} and max(w["bass"]) > 0
+
+
+def test_traktor_collection_roundtrip(tmp_path):
+    from app import traktor
+    t = {"id": 1, "path": r"C:\M\t.mp3", "title": "T", "artist": "A", "album": "", "genre": "", "duration": 100, "year": "",
+         "bpm": 124.5, "key": "8A", "comment": "", "rating": 0, "first_downbeat": None, "beat_offset": 0.5, "cues": []}
+    p = tmp_path / "collection.nml"
+    p.write_bytes(traktor.build([t], []))
+    got = traktor.read_collection(str(p))
+    e = got[str(Path(r"C:\M\t.mp3")) if os.name == "nt" else next(iter(got))]
+    assert e["bpm"] == 124.5 and abs(e["grid"] - 0.5) < 1e-3 and e["key"] == "8A"
+
+
+def test_tempocheck_against_traktor(client, tmp_path):
+    from app import traktor
+    tracks = list(by_title(client).values())
+    t = client.get(f"/api/tracks/{tracks[0]['id']}").json()
+    ref = dict(t, beat_offset=(t["beat_offset"] or 0) + 0.025, first_downbeat=(t["first_downbeat"] or 0) + 0.025)
+    nml = tmp_path / "collection.nml"
+    nml.write_bytes(traktor.build([ref], []))
+    r = client.post("/api/traktor/compare", json={"path": str(nml)}).json()
+    assert r["matched"] >= 1
+    d = client.get("/api/tempocheck").json()
+    row = next(x for x in d["diffs"] if x["id"] == t["id"])
+    assert row["kind"] == "same" and abs(row["phase_ms"] + 25) < 1.5
+    client.post("/api/tempocheck/use-traktor", json={"ids": [t["id"]]})
+    assert not any(x["id"] == t["id"] for x in client.get("/api/tempocheck").json()["diffs"])
+    rep = client.post(f"/api/tracks/{t['id']}/report", json={"note": "test"}).json()
+    assert Path(rep["path"]).exists()
+
+
+def test_ni_stem_box(tmp_path):
+    from app import ffmpeg as ff
+    from app import nistem
+    src = tmp_path / "a.wav"
+    ff.run(["-f", "lavfi", "-i", "sine=f=440:d=2", str(src)])
+    dst = tmp_path / "x.stem.mp4"
+    nistem.write_stem_file(str(src), [str(src)] * 4, str(dst), {"title": "X", "artist": "Y", "bpm": 128.0, "key": "8A"})
+    data = dst.read_bytes()
+    assert b"stem" in data and b"Drums" in data or b"drums" in data
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(dst)],
+                         capture_output=True, text=True).stdout.split()
+    assert out == ["aac"] * 5
+    dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(dst), "-map", "0:4", "-f", "null", "-"], capture_output=True, text=True)
+    assert dec.returncode == 0 and not dec.stderr.strip()

@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 """
 
 DEFAULT_SETTINGS = {
+    "traktor_collection": None,
     "export_dir": str(HOME / "exports"),
     "export_format": "wav",
     "write_tags_after_analysis": False,
@@ -66,6 +67,11 @@ MIGRATIONS = [
     "ALTER TABLE tracks ADD COLUMN tag_key TEXT",
     "ALTER TABLE tracks ADD COLUMN key_manual INTEGER DEFAULT 0",
     "ALTER TABLE tracks ADD COLUMN tempo_steady INTEGER DEFAULT 1",
+    "ALTER TABLE tracks ADD COLUMN tag_bpm REAL",
+    "ALTER TABLE tracks ADD COLUMN trk_bpm REAL",
+    "ALTER TABLE tracks ADD COLUMN trk_grid REAL",
+    "ALTER TABLE tracks ADD COLUMN trk_key TEXT",
+    "ALTER TABLE tracks ADD COLUMN stem_file TEXT",
 ]
 
 

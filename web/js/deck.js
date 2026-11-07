@@ -558,6 +558,7 @@ export class Deck {
           t.stems === "demucs4" ? "Separacja: Demucs, 4 ścieżki (perkusja, bas, melodia, wokal). Wyciszasz je przyciskami pod deckiem." : t.stems === "demucs" ? "Separacja: Demucs, 2 ścieżki. Rozdziel ponownie, aby dostać 4 ścieżki." : "Separacja: szybki podgląd. Zainstaluj Demucs, aby uzyskać wysoką jakość, i rozdziel ponownie.",
           t.vocal_ratio != null ? ` Wokal w ~${Math.round(t.vocal_ratio * 100)}% utworu.` : ""));
         if (t.stems !== "demucs4" && this.app.status?.demucs) content.append(h("button", { class: "btn", style: { marginTop: "6px" }, onclick: () => this.runStems(true) }, "Rozdziel ponownie (Demucs, 4 ścieżki)"));
+        if (this.has4) content.append(h("button", { class: "btn", style: { marginTop: "6px" }, title: "Plik .stem.mp4 do decków stemowych w Traktorze", onclick: () => { closePopover(); this.app.stemFiles([t.id]); } }, "🎛 Zapisz plik Stem dla Traktora"));
         if (this.has4) content.append(h("label", { class: "pop-row", style: { marginTop: "8px", fontSize: "12px" } },
           h("input", { type: "checkbox", checked: this.keepDrums, onchange: (e) => { this.keepDrums = e.target.checked; if (this.params.stem === "stems" && this.params.semitones) this.loadVariant(); } }),
           "Przy zmianie tonacji nie ruszaj perkusji (brzmi naturalniej)"));

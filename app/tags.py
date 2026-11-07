@@ -44,12 +44,34 @@ def read_tags(path: str) -> dict:
     except Exception:
         pass
     out["tag_key"] = read_tag_key(path, out.get("comment", ""))
+    out["tag_bpm"] = read_tag_bpm(path)
     guess = _guess_from_name(path)
     if not out["title"]:
         out["title"] = guess["title"]
     if not out["artist"]:
         out["artist"] = guess["artist"]
     return out
+
+
+def read_tag_bpm(path: str) -> float | None:
+    """BPM written by another program (Mixed In Key, Traktor, Rekordbox): TBPM / tmpo / BPM."""
+    try:
+        f = mutagen.File(path)
+        if f is None or not f.tags:
+            return None
+        t = f.tags
+        for k in ("TBPM", "tmpo", "BPM", "bpm", "TEMPO", "----:com.apple.iTunes:BPM"):
+            if k in t:
+                v = t[k]
+                v = v.text[0] if hasattr(v, "text") else (v[0] if isinstance(v, list) else v)
+                if isinstance(v, bytes):
+                    v = v.decode(errors="ignore")
+                bpm = float(str(v).replace(",", ".").strip())
+                if 40 <= bpm <= 250:
+                    return round(bpm, 3)
+    except Exception:
+        return None
+    return None
 
 
 def read_cover(path: str) -> tuple[bytes, str] | None:

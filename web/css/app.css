@@ -259,3 +259,4 @@ table.grid { width: 100%; border-collapse: collapse; }
 .stem-btn { font-size: 11px; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--c); background: color-mix(in srgb, var(--c) 22%, transparent); color: var(--text); cursor: pointer; }
 .stem-btn.muted { background: none; color: var(--muted); border-color: var(--line); text-decoration: line-through; }
 .stem-btn.pending { opacity: .55; border-style: dashed; }
+.grid td.acts { max-width: none; overflow: visible; }

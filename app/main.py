@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -132,7 +135,7 @@ def _relation(a: str, b: str) -> str:
 
 @app.get("/api/keycheck")
 def keycheck():
-    rows = db.q("SELECT id, artist, title, key, key2, key_confidence, tag_key, key_manual FROM tracks WHERE status = 'done' AND tag_key IS NOT NULL AND key IS NOT NULL")
+    rows = db.q("SELECT id, artist, title, key, key2, key_confidence, COALESCE(tag_key, trk_key) AS tag_key, key_manual FROM tracks WHERE status = 'done' AND COALESCE(tag_key, trk_key) IS NOT NULL AND key IS NOT NULL")
     counts = {"same": 0, "relative": 0, "fifth": 0, "parallel": 0, "other": 0}
     diffs = []
     for r in rows:
@@ -158,7 +161,7 @@ def _rescore_all(learned: dict | None) -> int:
 @app.post("/api/keycheck/learn")
 def keycheck_learn():
     """Learn key profiles from tracks whose tag key (e.g. from Mixed In Key) we trust, then re-score."""
-    items = [(t["key_features"], t["tag_key"]) for t in db.q("SELECT key_features, tag_key FROM tracks WHERE key_features IS NOT NULL AND tag_key IS NOT NULL")]
+    items = [(t["key_features"], t["ref"]) for t in db.q("SELECT key_features, COALESCE(tag_key, trk_key) AS ref FROM tracks WHERE key_features IS NOT NULL AND COALESCE(tag_key, trk_key) IS NOT NULL")]
     if len(items) < 20:
         raise HTTPException(400, f"Za mało utworów z tonacją w tagach i nową analizą ({len(items)}). Potrzeba co najmniej 20.")
     # honest estimate: 5-fold cross-validation, profiles never see the track they score
@@ -194,9 +197,168 @@ def rescan_tag_keys():
     n = 0
     for t in db.q("SELECT id, path, comment FROM tracks"):
         k = tags.read_tag_key(t["path"], t["comment"] or "")
-        db.update("tracks", t["id"], {"tag_key": k})
+        db.update("tracks", t["id"], {"tag_key": k, "tag_bpm": tags.read_tag_bpm(t["path"])})
         n += bool(k)
     return {"with_key": n}
+
+
+# ---------------------------------------------------------------- problem report
+class ReportReq(BaseModel):
+    note: str = ""
+
+
+@app.post("/api/tracks/{tid}/report")
+def track_report(tid: int, req: ReportReq):
+    """Zip with the analysis data, the waveform and a compact copy of the audio, to send for debugging."""
+    import zipfile
+
+    from . import __version__
+    t = _track_or_404(tid)
+    dst = _export_dir() / f"blendora-problem-{_safe_name(t['artist'] + ' - ' + t['title'])}.zip"
+    with tempfile.TemporaryDirectory() as tmp:
+        audio = Path(tmp) / "audio.opus"
+        try:
+            ffmpeg.run(["-i", t["path"], "-vn", "-ac", "2", "-c:a", "libopus", "-b:a", "96k", str(audio)])
+        except Exception:
+            audio = None
+        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+            info = {k: v for k, v in t.items() if k != "key_features"}
+            info["note"] = req.note
+            info["blendora_version"] = __version__
+            info["file_ext"] = Path(t["path"]).suffix.lower()
+            z.writestr("analysis.json", json.dumps(info, indent=1, ensure_ascii=False, default=str))
+            if wave_path(tid).exists():
+                z.write(wave_path(tid), "waveform.json")
+            if audio and audio.exists():
+                z.write(audio, "audio.opus")
+    return {"path": str(dst), "size_mb": round(dst.stat().st_size / 1e6, 1)}
+
+
+# ---------------------------------------------------------------- NI Stem files for Traktor
+@app.post("/api/tracks/{tid}/stemfile")
+def make_stem_file(tid: int):
+    """Write '<artist - title>.stem.mp4' (mix + drums, bass, melody, vocals) for Traktor's stem decks."""
+    from . import nistem
+    t = _track_or_404(tid)
+    if not stems.has_stems4(CACHE, tid):
+        raise HTTPException(409, "Najpierw rozdziel utwór na 4 stemy (wersja Pro)")
+
+    def work(progress):
+        out_dir = _export_dir() / "Stems"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = out_dir / f"{_safe_name(t['artist'] + ' - ' + t['title'])}.stem.mp4"
+        parts = [str(stems.stem_path(CACHE, tid, s)) for s in stems.STEMS4]
+        nistem.write_stem_file(t["path"], parts, str(dst), {"title": t["title"], "artist": t["artist"], "album": t["album"] or "",
+                                                            "genre": t["genre"] or "", "bpm": t["bpm"], "key": t["key"]})
+        db.update("tracks", tid, {"stem_file": str(dst)})
+        return {"path": str(dst)}
+
+    return jobs.submit("export", work, label=f"Plik Stem: {t['title']}")
+
+
+# ---------------------------------------------------------------- compare with Traktor / tags
+class TraktorReq(BaseModel):
+    path: str | None = None
+
+
+@app.get("/api/traktor/collections")
+def traktor_collections():
+    from . import traktor
+    return {"found": [str(p) for p in traktor.find_collections()]}
+
+
+@app.post("/api/traktor/compare")
+def traktor_compare(req: TraktorReq):
+    """Read BPM, beat grid and key that Traktor stored for the same files (collection.nml)."""
+    from . import traktor
+    path = req.path.strip().strip('"') if req.path else None
+    if not path:
+        found = traktor.find_collections()
+        if not found:
+            raise HTTPException(404, "Nie znalazłem collection.nml Traktora. Podaj ścieżkę do pliku.")
+        path = str(found[0])
+    if not os.path.isfile(path):
+        raise HTTPException(404, f"Brak pliku: {path}")
+    entries = traktor.read_collection(path)
+    by_path = {os.path.normcase(os.path.normpath(p)): e for p, e in entries.items()}
+    n = 0
+    for t in db.q("SELECT id, path FROM tracks"):
+        e = by_path.get(os.path.normcase(os.path.normpath(t["path"])))
+        if e:
+            db.update("tracks", t["id"], {"trk_bpm": e.get("bpm"), "trk_grid": e.get("grid"), "trk_key": e.get("key")})
+            n += 1
+    db.set_settings({"traktor_collection": path})
+    return {"path": path, "entries": len(entries), "matched": n}
+
+
+def _phase_ms(our_off: float, ref_off: float, bpm: float) -> float:
+    beat = 60.0 / bpm
+    d = (our_off - ref_off) % beat
+    if d > beat / 2:
+        d -= beat
+    return d * 1000.0
+
+
+@app.get("/api/tempocheck")
+def tempocheck():
+    rows = db.q("""SELECT id, path, artist, title, bpm, beat_offset, duration, tag_bpm, trk_bpm, trk_grid, tempo_steady
+                   FROM tracks WHERE status = 'done' AND bpm IS NOT NULL AND (trk_bpm IS NOT NULL OR tag_bpm IS NOT NULL)""")
+    counts = {"same": 0, "half_double": 0, "close": 0, "other": 0}
+    offsets_by_ext: dict[str, list[float]] = {}
+    out = []
+    for r in rows:
+        ref = r["trk_bpm"] or r["tag_bpm"]
+        src = "Traktor" if r["trk_bpm"] else "tagi"
+        factor = min((0.5, 1.0, 2.0), key=lambda f: abs(math.log(ref * f / r["bpm"])))
+        diff = ref * factor - r["bpm"]
+        drift_ms = abs(diff) / r["bpm"] * (r["duration"] or 0) * 1000  # grid error at the end of the track
+        tol = 0.06 if r["trk_bpm"] else 0.51  # tags are often rounded to whole BPM
+        if factor != 1.0:
+            kind = "half_double"
+        elif abs(diff) <= tol:
+            kind = "same"
+        elif abs(diff) <= 1.0:
+            kind = "close"
+        else:
+            kind = "other"
+        counts[kind] += 1
+        phase = None
+        if r["trk_grid"] is not None and r["trk_bpm"] and kind == "same":
+            phase = round(_phase_ms(r["beat_offset"] or 0.0, r["trk_grid"], r["bpm"]), 1)
+            offsets_by_ext.setdefault(Path(r["path"]).suffix.lower(), []).append(phase)
+        if kind != "same" or (phase is not None and abs(phase) > 10):
+            out.append({"id": r["id"], "artist": r["artist"], "title": r["title"], "bpm": r["bpm"], "ref_bpm": ref, "source": src,
+                        "kind": kind, "diff": round(diff, 3), "drift_ms": round(drift_ms), "phase_ms": phase, "steady": r["tempo_steady"]})
+    med = {ext: round(float(np.median(v)), 1) for ext, v in offsets_by_ext.items() if len(v) >= 3}
+    out.sort(key=lambda d: (d["kind"] == "same", -d["drift_ms"]))
+    return {"total": len(rows), "counts": counts, "diffs": out[:300], "median_offset_ms": med,
+            "traktor": db.settings().get("traktor_collection")}
+
+
+class UseRefReq(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/tempocheck/use-traktor")
+def use_traktor_grid(req: UseRefReq):
+    """Take BPM and beat grid from Traktor for these tracks (cues follow the grid shift)."""
+    n = 0
+    for tid in req.ids:
+        t = _track_or_404(tid)
+        if not t.get("trk_bpm") or t.get("trk_grid") is None:
+            continue
+        bpm = float(t["trk_bpm"])
+        beat = 60.0 / bpm
+        new_off = t["trk_grid"] % beat
+        delta = _phase_ms(new_off, t["beat_offset"] or 0.0, bpm) / 1000.0
+        fd = (t["first_downbeat"] or 0.0) + delta
+        bar = 4 * beat
+        fd = fd - math.floor(fd / bar) * bar
+        cues = sorted(max(0.0, c + delta) for c in (t["cues"] or []))
+        segs = [{**g, "start": round(g["start"] + delta, 3), "end": round(g["end"] + delta, 3)} for g in (t["segments"] or [])]
+        db.update("tracks", tid, {"bpm": round(bpm, 4), "beat_offset": round(new_off, 4), "first_downbeat": round(fd, 4), "cues": cues, "segments": segs})
+        n += 1
+    return {"changed": n}
 
 
 @app.get("/api/camelot")
@@ -258,7 +420,7 @@ async def import_upload(files: list[UploadFile] = File(...)):
 
 
 # ---------------------------------------------------------------- tracks
-TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, key2, tag_key, key_manual, tempo_steady, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
+TRACK_COLS = "id, path, artist, title, album, genre, comment, year, rating, duration, key, key_name, key_confidence, key2, tag_key, trk_key, tag_bpm, trk_bpm, stem_file, key_manual, tempo_steady, bpm, beat_offset, first_downbeat, energy, cues, segments, status, error, stems, vocal_ratio, has_cover, added_at"
 
 
 @app.get("/api/tracks")
@@ -752,9 +914,13 @@ def export_traktor():
     from . import traktor
     tracks = db.q(f"SELECT {TRACK_COLS} FROM tracks WHERE status = 'done'")
     pls = [(p["name"], playlist_tracks(p["id"])) for p in db.q("SELECT id, name FROM playlists ORDER BY sort, id")]
+    # Stem files (.stem.mp4) as their own entries with the same grid, key and cues, in a "Pliki Stem" playlist
+    stem_entries = [{**t, "id": -t["id"], "path": t["stem_file"]} for t in tracks if t.get("stem_file") and os.path.isfile(t["stem_file"])]
+    if stem_entries:
+        pls.append(("Pliki Stem", [t["id"] for t in stem_entries]))
     dst = _export_dir() / "blendora_traktor.nml"
-    dst.write_bytes(traktor.build(tracks, pls))
-    return {"path": str(dst), "tracks": len(tracks), "playlists": len(pls)}
+    dst.write_bytes(traktor.build(tracks + stem_entries, pls))
+    return {"path": str(dst), "tracks": len(tracks), "playlists": len(pls), "stem_files": len(stem_entries)}
 
 
 # ---------------------------------------------------------------- saved mashups

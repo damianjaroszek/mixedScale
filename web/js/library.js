@@ -1,6 +1,6 @@
 // Library table: filtering, sorting, selection, drag & drop, ratings, context menu.
 import { api } from "./api.js";
-import { h, $, popover, closePopover, toast, keyBadge, keyColor, fmtTime, confirmBox } from "./ui.js";
+import { h, $, popover, closePopover, toast, keyBadge, keyColor, fmtTime, confirmBox, prompt } from "./ui.js";
 
 export class Library {
   constructor(app) {
@@ -224,7 +224,9 @@ export class Library {
       h("hr"),
       item("Rozdziel na stemy", () => app.stemsFor(ids)),
       item("Wpisz tonację i energię do komentarza", () => app.bulk(ids, "comment_key")),
+      item("🎛 Zapisz plik Stem dla Traktora (.stem.mp4)", () => app.stemFiles(ids)),
       item("Analizuj ponownie", () => app.bulk(ids, "reanalyze")),
+      item("⚠ Zgłoś problem z analizą…", () => app.reportProblem(id)),
       item("Usuń z biblioteki (plik zostaje na dysku)", async () => { if (await confirmBox("Usunąć z biblioteki?", `${ids.length} utw. zniknie z biblioteki. Pliki na dysku pozostaną.`)) app.bulk(ids, "remove"); }),
     ), { align: "right" });
   }

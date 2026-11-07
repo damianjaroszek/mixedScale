@@ -371,6 +371,34 @@ class App {
     toast(action === "remove" ? "Usunięto z biblioteki" : action === "reanalyze" ? "Dodano do kolejki analizy" : "Gotowe");
   }
 
+  // NI Stem files for Traktor's stem decks (needs the 4-stem split)
+  async stemFiles(ids) {
+    const ready = ids.filter((id) => this.byId.get(id)?.stems === "demucs4");
+    const missing = ids.length - ready.length;
+    if (missing && this.status?.demucs) {
+      toast(`${missing} utw. nie ma jeszcze 4 stemów: najpierw je rozdzielę.`);
+      await this.stemsFor(ids.filter((id) => !ready.includes(id)), true);
+    } else if (missing) toast(`${missing} utw. pominięto: pliki Stem wymagają rozdzielenia na 4 ścieżki (wersja Pro).`, { error: true });
+    const todo = ids.filter((id) => this.byId.get(id)?.stems === "demucs4");
+    let last = null;
+    for (const id of todo) {
+      try { last = await api.waitJob(await api.post(`/api/tracks/${id}/stemfile`)); this.updateTrack(await api.get(`/api/tracks/${id}`)); }
+      catch (err) { toast(err.message, { error: true }); }
+    }
+    if (last?.result?.path) toast(`Pliki Stem zapisane (${todo.length}). Eksport do Traktora (.nml) dołączy je z cue i siatką.`, { ms: 9000, action: { label: "Pokaż folder", fn: () => api.post("/api/open-folder", { path: last.result.path }) } });
+  }
+
+  async reportProblem(id) {
+    const t = this.byId.get(id);
+    const note = await prompt("Zgłoś problem z analizą", "", `${t.artist} – ${t.title}. Opisz krótko, co jest źle (np. „cue 3 o takt za późno”, „rozjeżdża się po 2 minucie”, „tonacja to 5A”). Powstanie plik .zip do wysłania.`);
+    if (note == null) return;
+    try {
+      toast("Przygotowuję paczkę…");
+      const r = await api.post(`/api/tracks/${id}/report`, { note });
+      toast(`Gotowe: ${r.path} (${r.size_mb} MB). Wyślij ten plik w rozmowie.`, { ms: 15000, action: { label: "Pokaż folder", fn: () => api.post("/api/open-folder", { path: r.path }) } });
+    } catch (err) { toast(err.message, { error: true }); }
+  }
+
   async stemsFor(ids, force = false) {
     toast(`Separacja stemów: ${ids.length} utw. (działa w tle, możesz dalej pracować)`);
     for (const id of ids) {
