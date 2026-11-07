@@ -430,7 +430,8 @@ def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac
     rdir = CACHE / "render"
     rdir.mkdir(parents=True, exist_ok=True)
     tag = hashlib.md5(f"{src}|{os.path.getmtime(src)}".encode()).hexdigest()[:8]
-    dst = rdir / f"{t['id']}_{stem}_{semitones:+d}_{tempo:.5f}_{tag}{'_p' if fast else ''}{ext}"
+    stem_tag = re.sub(r"[^a-z0-9]+", "-", stem)  # e.g. "mute:vocals,drums" -> safe on Windows
+    dst = rdir / f"{t['id']}_{stem_tag}_{semitones:+d}_{tempo:.5f}_{tag}{'_p' if fast else ''}{ext}"
     # a high-quality render can always stand in for a preview one, not the other way round
     if fast and (hq := rdir / dst.name.replace("_p" + ext, ext)).exists():
         return str(hq)
