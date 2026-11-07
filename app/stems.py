@@ -19,6 +19,7 @@ import numpy as np
 from . import ffmpeg
 
 STEMS = ("vocals", "instrumental")
+STEMS4 = ("drums", "bass", "other", "vocals")  # Demucs: perkusja, bas, melodia, wokal
 
 
 def demucs_command() -> list[str] | None:
@@ -73,9 +74,14 @@ def has_stems(cache: Path, track_id: int) -> bool:
     return all(stem_path(cache, track_id, s).exists() for s in STEMS)
 
 
+def has_stems4(cache: Path, track_id: int) -> bool:
+    return all(stem_path(cache, track_id, s).exists() for s in STEMS4)
+
+
 def _separate_demucs(src: str, out: Path, model: str, progress=None) -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        cmd = [*demucs_command(), "--two-stems=vocals", "-n", model, "-o", tmp, "--filename", "{stem}.{ext}", "--flac", src]
+        # all four stems (drums, bass, other, vocals): same cost for Demucs as a two-stem split
+        cmd = [*demucs_command(), "-n", model, "-o", tmp, "--filename", "{stem}.{ext}", "--flac", src]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=demucs_env(),
                                 text=True, encoding="utf-8", errors="replace", bufsize=1, **ffmpeg.NO_WINDOW)
         tail = []
@@ -99,8 +105,11 @@ def _separate_demucs(src: str, out: Path, model: str, progress=None) -> None:
         if proc.wait() != 0:
             raise RuntimeError("Demucs zakończył się błędem:\n" + "\n".join(tail[-6:]))
         base = Path(tmp) / model
-        shutil.move(str(base / "vocals.flac"), out / "vocals.flac")
-        shutil.move(str(base / "no_vocals.flac"), out / "instrumental.flac")
+        for st in STEMS4:
+            shutil.move(str(base / f"{st}.flac"), out / f"{st}.flac")
+        # instrumental = everything but the vocals
+        ffmpeg.run(["-i", str(out / "drums.flac"), "-i", str(out / "bass.flac"), "-i", str(out / "other.flac"),
+                    "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:normalize=0[o]", "-map", "[o]", "-c:a", "flac", str(out / "instrumental.flac")])
 
 
 def _separate_quick(src: str, out: Path) -> None:
@@ -124,7 +133,7 @@ def separate(src: str, cache: Path, track_id: int, model: str = "htdemucs", prog
     out.mkdir(parents=True, exist_ok=True)
     if demucs_available():
         _separate_demucs(src, out, model, progress)
-        engine = "demucs"
+        engine = "demucs4"
     else:
         _separate_quick(src, out)
         engine = "quick"
@@ -141,3 +150,19 @@ def vocal_profile(cache: Path, track_id: int, bars: list[tuple[float, float]] | 
     ir = np.sqrt((i[:n].reshape(-1, 8000) ** 2).mean(axis=1))
     active = vr > 0.25 * (ir + 1e-4)
     return {"vocal_ratio": float(active.mean()) if len(active) else 0.0, "activity": (np.clip(vr / (vr.max() + 1e-9), 0, 1) * 255).astype(int).tolist()}
+
+
+def stem_waves(cache: Path, track_id: int, pps: int = 50) -> dict:
+    """Peak envelope (0-255, `pps` points per second) of each of the four stems, for the lanes."""
+    out = {"pps": pps}
+    sr = 8000
+    hop = sr // pps
+    peaks = {}
+    for st in STEMS4:
+        x = np.abs(ffmpeg.decode(str(stem_path(cache, track_id, st)), sr=sr))
+        n = len(x) // hop
+        peaks[st] = x[: n * hop].reshape(n, hop).max(axis=1) if n else np.zeros(0)
+    top = max((float(v.max()) for v in peaks.values() if len(v)), default=1.0) + 1e-9
+    for st, v in peaks.items():
+        out[st] = (np.clip(v / top, 0, 1) * 255).astype(int).tolist()
+    return out

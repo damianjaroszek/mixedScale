@@ -190,6 +190,8 @@ def run_stems(db: DB, track_id: int, progress=None) -> dict:
         engine = stems.separate(t["path"], CACHE, track_id, db.settings().get("stem_model", "htdemucs"), progress)
         prof = stems.vocal_profile(CACHE, track_id)
         (stems.stem_dir(CACHE, track_id) / "vocals.json").write_text(json.dumps(prof))
+        if stems.has_stems4(CACHE, track_id):
+            (stems.stem_dir(CACHE, track_id) / "stemwave.json").write_text(json.dumps(stems.stem_waves(CACHE, track_id)))
         db.update("tracks", track_id, {"stems": engine, "vocal_ratio": round(prof["vocal_ratio"], 3)})
         return {"engine": engine, "vocal_ratio": prof["vocal_ratio"]}
     except Exception:

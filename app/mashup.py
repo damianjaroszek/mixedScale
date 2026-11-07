@@ -52,8 +52,14 @@ def score_pair(a: dict, b: dict, shift_a: int = 0, opts: dict | None = None) -> 
     reasons.append(f"tempo ±{diff:.1f}%")
     va, vb = a.get("vocal_ratio"), b.get("vocal_ratio")
     if mode == "mashup" and va is not None and vb is not None:
-        if (va > 0.25) != (vb > 0.25):
-            score += 5
+        if va < 0.25 and vb > 0.35:
+            score += 8
+            reasons.append("wokal z B na podkład A")
+        elif va > 0.35 and vb < 0.25:
+            score += 6
+            reasons.append("podkład z B pod wokal A")
+        elif (va > 0.25) != (vb > 0.25):
+            score += 4
             reasons.append("wokal + instrumental")
     return {
         "track_id": b["id"],

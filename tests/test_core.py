@@ -267,3 +267,23 @@ def test_traktor_nml():
     assert [c.get("HOTCUE") for c in cues[1:]] == ["0", "1"] and cues[2].get("START") == "34500.000000"
     assert e.find("MUSICAL_KEY").get("VALUE") == "21" and e.find("INFO").get("RANKING") == "255"
     assert x.find(".//PRIMARYKEY").get("KEY") == "C:/:M/:t.mp3"
+
+
+def test_four_stems_mute_mix(client):
+    """Stem mode: muted stems are left out of the mix served to the deck / export; lanes waveform."""
+    from app import ffmpeg as ff
+    from app import stems
+    from app.db import CACHE
+
+    t = next(iter(by_title(client).values()))
+    d = stems.stem_dir(CACHE, t["id"])
+    d.mkdir(parents=True, exist_ok=True)
+    for st, flt in (("drums", "highpass=f=4000"), ("bass", "lowpass=f=150"), ("other", "bandpass=f=800"), ("vocals", "bandpass=f=2000")):
+        ff.run(["-i", t["path"], "-af", flt, "-t", "20", "-c:a", "flac", str(d / f"{st}.flac")])
+    assert stems.has_stems4(CACHE, t["id"])
+    r = client.get(f"/api/tracks/{t['id']}/audio", params={"stem": "mute:vocals,drums", "semitones": 1})
+    assert r.status_code == 200 and len(r.content) > 10000
+    assert (d / "mix_bass_other.flac").exists()
+    assert client.get(f"/api/tracks/{t['id']}/audio", params={"stem": "mute:drums,bass,other,vocals"}).status_code == 400
+    w = client.get(f"/api/tracks/{t['id']}/stemwave").json()
+    assert set(w) >= {"pps", "drums", "bass", "other", "vocals"} and max(w["bass"]) > 0

@@ -1,10 +1,11 @@
 // A deck: Web Audio playback of a (pre-rendered) track variant + waveform view + controls.
 import { api } from "./api.js";
 import { h, $, popover, closePopover, toast, fmtTime, keyBadge, transpose } from "./ui.js";
+import { Channel, knob, SourceGroup, STEMS4, STEM4_NAMES, STEM4_COLORS } from "./mixer.js";
 
 export const ctx = new (window.AudioContext || window.webkitAudioContext)();
 const ZOOM_BARS = [0, 64, 32, 16, 8, 4, 2];
-const STEM_NAMES = { full: "Cały utwór", vocals: "Acapella", instrumental: "Instrumental" };
+const STEM_NAMES = { full: "Cały utwór", vocals: "Acapella", instrumental: "Instrumental", stems: "4 ścieżki" };
 
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function hexRgb(hex) { const n = parseInt(hex.replace("#", ""), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
@@ -33,6 +34,13 @@ export class Deck {
     this.busy = "";
     this.out = ctx.createGain();
     this.out.connect(ctx.destination);
+    // channel strip: (stem gains) -> EQ isolator -> filter -> crossfader gain
+    this.channel = new Channel(ctx, this.out);
+    this.stemGains = Object.fromEntries(STEMS4.map((st) => { const g = ctx.createGain(); g.connect(this.channel.input); return [st, g]; }));
+    this.mutes = new Set();
+    this.stemBuffers = null;
+    this.stemWave = null;
+    this.keepDrums = true; // key change: shift vocals/bass/melody only, drums stay natural
     this.build();
   }
 
@@ -93,6 +101,7 @@ export class Deck {
       h("div", { class: "deck-title" }, this.playBtn, this.nameEl, this.swapBtn),
       h("div", { class: "deck-info" }, this.keyEl, this.keyName, h("span", { class: "sep" }), this.bpmEl, h("span", { class: "sep" }), this.energyEl, this.timeEl),
       this.padsEl = h("div", { class: "cue-pads" }),
+      this.buildMixer(),
       h("div", { class: "deck-ctrl" }, this.keyBtn, this.stemBtn, h("span", { style: { display: "inline-flex" } }, this.loopBtn, this.loopSize), this.syncBtn, this.nudgeEl, this.gridBtn, this.exportBtn),
     );
     // drag & drop from library
@@ -139,6 +148,7 @@ export class Deck {
     this.stemBtn.replaceChildren("≋ " + (this.params.stem === "full" ? "Stemy" : STEM_NAMES[this.params.stem]));
     this.stemBtn.classList.toggle("on", this.params.stem !== "full");
     this.loopBtn.classList.toggle("loop-on", this.loop.on);
+    this.renderStemBtns?.();
     this.loopSize.textContent = String(this.loop.beats);
     this.syncBtn.classList.toggle("on", this.sync);
     this.playBtn.classList.toggle("on", this.playing);
@@ -152,19 +162,102 @@ export class Deck {
   async load(track, { semitones = 0, stem = "full", cue } = {}) {
     this.stop();
     this.track = track;
+    this.mutes.clear();
     this.params = { stem: track.stems && track.stems !== "none" && track.stems !== "running" ? stem : "full", semitones, tempo: 1 };
+    if (this.params.stem.startsWith("mute:")) { // saved mashup: 4 stems with some muted
+      if (track.stems === "demucs4") this.params.stem.slice(5).split(",").filter(Boolean).forEach((m) => this.mutes.add(m));
+      this.params.stem = track.stems === "demucs4" ? "stems" : "full";
+    }
     this.loop.on = false;
     if (cue == null || cue < 0) cue = this.defaultCue();
     this.selCue = cue;
     this.pausedOrig = this.cueTime(cue);
     this.wave = null;
     this.vocals = null;
+    this.stemWave = null;
+    this.stemBuffers = null;
+    this.applyMutes();
     this.zoom = 0;
     this.updateInfo();
     api.get(`/api/tracks/${track.id}/waveform`).then((w) => { if (this.track?.id === track.id) { this.wave = w; this.draw(); } }).catch(() => {});
     this.loadVocals();
+    this.loadStemWave();
     this.computeSyncTempo();
     await this.loadVariant();
+  }
+
+  // ------------------------------------------------------------------ 4 stems (drums / bass / melody / vocals)
+  get has4() { return this.track?.stems === "demucs4"; }
+
+  loadStemWave() {
+    const id = this.track?.id;
+    if (!this.has4) return;
+    api.get(`/api/tracks/${id}/stemwave`).then((w) => { if (this.track?.id === id) { this.stemWave = w; this.draw(); } }).catch(() => {});
+  }
+
+  applyMutes() {
+    for (const st of STEMS4) this.stemGains[st].gain.setTargetAtTime(this.mutes.has(st) ? 0 : 1, ctx.currentTime, 0.006);
+    this.renderStemBtns?.();
+    this.draw?.();
+  }
+
+  // click: mute / unmute; shift+click: solo
+  async toggleMute(st, solo = false) {
+    if (!this.track) return;
+    if (!this.has4) {
+      if (this.app.status?.demucs) {
+        if (this.track.stems === "running") return toast("Separacja tego utworu już trwa");
+        toast(`Deck ${this.name}: rozdzielam na 4 ścieżki (1–3 min)…`);
+        await this.runStems(this.track.stems && this.track.stems !== "none");
+        if (!this.has4) return;
+      } else return toast("Rozdzielanie na 4 ścieżki wymaga wersji Blendora Pro (Demucs).", { error: true });
+    }
+    if (solo) {
+      const only = STEMS4.every((x) => x === st || this.mutes.has(x)) && !this.mutes.has(st);
+      this.mutes = new Set(only ? [] : STEMS4.filter((x) => x !== st));
+    } else if (this.mutes.has(st)) this.mutes.delete(st);
+    else this.mutes.add(st);
+    this.applyMutes();
+    if (this.params.stem !== "stems") await this.setStem("stems");
+  }
+
+  muteString() { return this.params.stem === "stems" ? "mute:" + [...this.mutes].join(",") : this.params.stem; }
+
+  buildMixer() {
+    const ch = this.channel;
+    const fmtDb = (v) => (v === 0 ? "0 dB" : `${v > 0 ? "+" : ""}${Math.round(v < 0 ? v * 26 : v * 6)} dB`);
+    this.knobs = {};
+    this.killBtns = {};
+    const band = (b, label) => {
+      const k = knob({ label, title: `EQ ${label} (deck ${this.name})`, onChange: (v) => ch.setBand(b, v), format: fmtDb });
+      const kill = h("button", { class: "kill", title: `Wytnij ${label} całkowicie (${{ low: "A", mid: "S", high: "D" }[b]}${this.name === "B" ? " z Shift" : ""})`, onclick: () => this.toggleKill(b) }, "kill");
+      this.knobs[b] = k;
+      this.killBtns[b] = kill;
+      return h("div", { class: "band" }, k, kill);
+    };
+    const filt = knob({ label: "FILTR", title: "W lewo: low-pass (ciemniej), w prawo: high-pass (bez basu)", onChange: (v) => ch.setFilter(v),
+      format: (v) => (v === 0 ? "—" : v < 0 ? "LP" : "HP") });
+    this.knobs.filter = filt;
+    this.stemBtnsEl = h("div", { class: "stem-btns" });
+    this.renderStemBtns = () => {
+      const t = this.track;
+      if (!t || (!this.has4 && !this.app.status?.demucs)) { this.stemBtnsEl.replaceChildren(); return; }
+      this.stemBtnsEl.replaceChildren(...STEMS4.map((st) => h("button", {
+        class: "stem-btn" + (this.mutes.has(st) ? " muted" : "") + (this.has4 ? "" : " pending"),
+        title: this.has4 ? `${STEM4_NAMES[st]}: klik = wycisz / włącz, Shift + klik = solo` : "Kliknij, aby rozdzielić utwór na 4 ścieżki (Demucs)",
+        onclick: (e) => this.toggleMute(st, e.shiftKey),
+      }, STEM4_NAMES[st])));
+      for (const [i, b] of [...this.stemBtnsEl.children].entries()) b.style.setProperty("--c", STEM4_COLORS[STEMS4[i]]);
+    };
+    return h("div", { class: "deck-mix" },
+      h("div", { class: "eq" }, band("high", "HI"), band("mid", "MID"), band("low", "LOW"), h("div", { class: "band" }, filt)),
+      this.stemBtnsEl);
+  }
+
+  toggleKill(b) {
+    const on = !this.channel.state.kill[b];
+    this.channel.setKill(b, on);
+    this.killBtns[b].classList.toggle("on", on);
   }
 
   loadVocals() {
@@ -176,6 +269,11 @@ export class Deck {
   // render neighbouring keys in the background so the next key change is instant
   prefetchNeighbours() {
     const { stem, semitones, tempo } = this.params;
+    if (stem === "stems") { // three melodic stems: only the nearest keys
+      const want = [1, -1].map((d) => semitones + d).filter((s) => s >= -4 && s <= 4);
+      for (const st of ["vocals", "bass", "other"]) api.post(`/api/tracks/${this.track.id}/prefetch`, { stem: st, semitones: want, tempo, deck: this.name + st }).catch(() => {});
+      return;
+    }
     const want = [1, -1, 2, -2].map((d) => semitones + d).filter((s) => s >= -4 && s <= 4);
     api.post(`/api/tracks/${this.track.id}/prefetch`, { stem, semitones: want, tempo, deck: this.name }).catch(() => {});
   }
@@ -189,11 +287,19 @@ export class Deck {
     const wasPlaying = this.playing;
     const pos = this.position();
     try {
-      const url = `/api/tracks/${this.track.id}/audio?stem=${stem}&semitones=${semitones}&tempo=${tempo.toFixed(5)}`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      const buf = await ctx.decodeAudioData(await r.arrayBuffer());
+      const get = async (st, semi) => {
+        const r = await fetch(`/api/tracks/${this.track.id}/audio?stem=${st}&semitones=${semi}&tempo=${tempo.toFixed(5)}`);
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        return ctx.decodeAudioData(await r.arrayBuffer());
+      };
+      let buf, stemBufs = null;
+      if (stem === "stems") {
+        const list = await Promise.all(STEMS4.map((st) => get(st, st === "drums" && this.keepDrums ? 0 : semitones)));
+        stemBufs = Object.fromEntries(STEMS4.map((st, i) => [st, list[i]]));
+        buf = stemBufs.other;
+      } else buf = await get(stem, semitones);
       if (token !== this.loadToken) return;
+      this.stemBuffers = stemBufs;
       this.prefetchNeighbours();
       if (wasPlaying && this.playing) {
         // seamless swap: keep the musical position (and so the phase against the other deck)
@@ -243,10 +349,10 @@ export class Deck {
       try { old.stop(at); } catch {}
       setTimeout(() => old.disconnect(), (at - ctx.currentTime) * 1000 + 300);
     }
-    const src = ctx.createBufferSource();
-    src.buffer = this.buffer;
+    let src;
+    if (this.stemBuffers) src = new SourceGroup(ctx, STEMS4.map((st) => ({ buffer: this.stemBuffers[st], dest: this.stemGains[st] })));
+    else { src = ctx.createBufferSource(); src.buffer = this.buffer; src.connect(this.channel.input); }
     src.playbackRate.value = this.rate;
-    src.connect(this.out);
     const startB = Math.max(0, Math.min(this.toBuf(fromOrig), this.buffer.duration - 0.01));
     if (this.loop.on) this.applyLoop(src);
     src.start(at, startB);
@@ -446,17 +552,20 @@ export class Deck {
     const render = () => {
       content.replaceChildren();
       if (ready) {
-        content.append(h("div", { class: "pop-row" }, ["full", "vocals", "instrumental"].map((s) =>
+        content.append(h("div", { class: "pop-row" }, ["full", "vocals", "instrumental", ...(this.has4 ? ["stems"] : [])].map((s) =>
           h("button", { class: "btn" + (this.params.stem === s ? " accent" : ""), onclick: () => { this.setStem(s); closePopover(); } }, STEM_NAMES[s]))));
         content.append(h("p", { class: "muted", style: { fontSize: "11px", margin: "8px 0 0" } },
-          t.stems === "demucs" ? "Separacja: Demucs (wysoka jakość, lokalnie)." : "Separacja: szybki podgląd. Zainstaluj Demucs, aby uzyskać wysoką jakość, i rozdziel ponownie.",
+          t.stems === "demucs4" ? "Separacja: Demucs, 4 ścieżki (perkusja, bas, melodia, wokal). Wyciszasz je przyciskami pod deckiem." : t.stems === "demucs" ? "Separacja: Demucs, 2 ścieżki. Rozdziel ponownie, aby dostać 4 ścieżki." : "Separacja: szybki podgląd. Zainstaluj Demucs, aby uzyskać wysoką jakość, i rozdziel ponownie.",
           t.vocal_ratio != null ? ` Wokal w ~${Math.round(t.vocal_ratio * 100)}% utworu.` : ""));
-        if (t.stems !== "demucs" && this.app.status?.demucs) content.append(h("button", { class: "btn", style: { marginTop: "6px" }, onclick: () => this.runStems(true) }, "Rozdziel ponownie (Demucs)"));
+        if (t.stems !== "demucs4" && this.app.status?.demucs) content.append(h("button", { class: "btn", style: { marginTop: "6px" }, onclick: () => this.runStems(true) }, "Rozdziel ponownie (Demucs, 4 ścieżki)"));
+        if (this.has4) content.append(h("label", { class: "pop-row", style: { marginTop: "8px", fontSize: "12px" } },
+          h("input", { type: "checkbox", checked: this.keepDrums, onchange: (e) => { this.keepDrums = e.target.checked; if (this.params.stem === "stems" && this.params.semitones) this.loadVariant(); } }),
+          "Przy zmianie tonacji nie ruszaj perkusji (brzmi naturalniej)"));
       } else {
         const prog = h("div", { class: "progress" }, h("div"));
         content.append(
           h("h4", {}, "Ten utwór nie ma jeszcze stemów"),
-          h("button", { class: "btn accent wide", onclick: (e) => { e.currentTarget.disabled = true; this.runStems(false, prog.firstChild); } }, "Rozdziel: wokal / instrumental"),
+          h("button", { class: "btn accent wide", onclick: (e) => { e.currentTarget.disabled = true; this.runStems(false, prog.firstChild); } }, this.app.status?.demucs ? "Rozdziel: perkusja / bas / melodia / wokal" : "Rozdziel: wokal / instrumental"),
           h("div", { style: { marginTop: "8px" } }, prog),
           h("p", { class: "muted", style: { fontSize: "11px", maxWidth: "260px", margin: "8px 0 0" } },
             this.app.status?.demucs ? "Demucs działa lokalnie. Na CPU zajmuje to zwykle 1–3 minuty." : "Demucs nie jest zainstalowany: użyję szybkiego podglądu niskiej jakości."));
@@ -474,7 +583,7 @@ export class Deck {
       if (job.status === "running") job = await api.waitJob(job, (p) => { if (bar) bar.style.width = `${Math.round(p * 100)}%`; this.setBusy(`⏳ separacja stemów ${Math.round(p * 100)}%`); });
       const fresh = await api.get(`/api/tracks/${t.id}`);
       this.app.updateTrack(fresh);
-      if (this.track?.id === t.id) { this.track = fresh; this.loadVocals(); }
+      if (this.track?.id === t.id) { this.track = fresh; this.loadVocals(); this.loadStemWave(); }
       this.setBusy("");
       closePopover();
       toast(`Stemy gotowe: ${t.title}`);
@@ -793,9 +902,31 @@ export class Deck {
         g.fillRect(Math.round(X(bt)), 0, 1, H);
       }
     }
-    // waveform
-    const w = this.wave;
-    if (w) {
+    // waveform: four stem lanes in stem mode (muted lanes greyed out), otherwise the full mix
+    const w = this.wave, sw = this.stemWave;
+    if (sw && this.params.stem === "stems") {
+      const top = 18 * dpr, laneH = (H - top - 6 * dpr) / 4, pps = sw.pps;
+      STEMS4.forEach((st, li) => {
+        const arr = sw[st] || [], n = arr.length, muted = this.mutes.has(st);
+        const cy = top + laneH * (li + 0.5), a2 = laneH / 2 - 1;
+        const col = hexRgb(STEM4_COLORS[st]);
+        for (let x = 0; x < W; x++) {
+          const ta = v0 + (x / W) * span, tb = v0 + ((x + 1) / W) * span;
+          let i0 = Math.floor(ta * pps), i1 = Math.max(i0 + 1, Math.floor(tb * pps));
+          if (i0 >= n) break;
+          i1 = Math.min(i1, n);
+          let pk = 0;
+          for (let i = i0; i < i1; i++) if (arr[i] > pk) pk = arr[i];
+          const hh = (pk / 255) * a2;
+          g.fillStyle = muted ? "rgba(120,120,130,.25)" : `rgba(${col[0]},${col[1]},${col[2]},${ta < pos ? 0.45 : 0.9})`;
+          g.fillRect(x, cy - hh, 1, hh * 2 || 1);
+        }
+        g.fillStyle = muted ? "rgba(255,255,255,.3)" : `rgb(${col[0]},${col[1]},${col[2]})`;
+        g.font = `${9 * dpr}px ${css("--font") || "sans-serif"}`;
+        g.textBaseline = "middle";
+        g.fillText(STEM4_NAMES[st] + (muted ? " (wycisz.)" : ""), 4 * dpr, cy - a2 + 6 * dpr);
+      });
+    } else if (w) {
       const pps = w.pps, n = w.peak.length;
       const low = hexRgb(css("--wave-low")), midc = hexRgb(css("--wave-mid")), high = hexRgb(css("--wave-high"));
       for (let x = 0; x < W; x++) {

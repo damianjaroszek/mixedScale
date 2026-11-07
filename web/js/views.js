@@ -16,7 +16,7 @@ export async function renderMashups(app) {
   })));
   const side = (m, s) => h("div", {},
     h("div", {}, m[`artist_${s}`], " – ", h("b", {}, m[`title_${s}`])),
-    h("div", { class: "muted", style: { fontSize: "11px" } }, keyBadge(transpose(m[`key_${s}`], m[`shift_${s}`])), m[`shift_${s}`] ? ` (${m[`shift_${s}`] > 0 ? "+" : ""}${m[`shift_${s}`]} półt.)` : "", ` · ${STEM_NAMES[m[`stem_${s}`]] || ""} · ${Math.round(m[`bpm_${s}`] || 0)} BPM`));
+    h("div", { class: "muted", style: { fontSize: "11px" } }, keyBadge(transpose(m[`key_${s}`], m[`shift_${s}`])), m[`shift_${s}`] ? ` (${m[`shift_${s}`] > 0 ? "+" : ""}${m[`shift_${s}`]} półt.)` : "", ` · ${stemLabel(m[`stem_${s}`])} · ${Math.round(m[`bpm_${s}`] || 0)} BPM`));
   const rows = list.map((m) => h("tr", {},
     h("td", {}, side(m, "a")),
     h("td", { class: "muted" }, "×"),
@@ -36,8 +36,20 @@ export async function renderMashups(app) {
       : h("div", { class: "empty" }, h("h3", {}, "Brak zapisanych mashupów"), h("p", {}, "Wczytaj utwory do decków, przetestuj i kliknij „★ Zapisz mashup”."))));
 }
 
+const STEM4_PL = { drums: "perkusja", bass: "bas", other: "melodia", vocals: "wokal" };
+function stemLabel(v) {
+  if (!v) return "";
+  if (v.startsWith("mute:")) {
+    const m = v.slice(5).split(",").filter(Boolean);
+    return m.length ? `4 ścieżki, bez: ${m.map((x) => STEM4_PL[x] || x).join(", ")}` : "4 ścieżki";
+  }
+  return STEM_NAMES[v] || "";
+}
+
 export function exportMashupModal(app, m) {
-  const sel = (val) => h("select", { class: "field" }, Object.entries(STEM_NAMES).map(([k, v]) => h("option", { value: k, selected: k === val }, v)));
+  const opts = { ...STEM_NAMES };
+  for (const v of [m.stem_a, m.stem_b]) if (v?.startsWith("mute:")) opts[v] = stemLabel(v);
+  const sel = (val) => h("select", { class: "field" }, Object.entries(opts).map(([k, v]) => h("option", { value: k, selected: k === val }, v)));
   const stemA = sel(m.stem_a === "full" ? "vocals" : m.stem_a), stemB = sel(m.stem_b === "full" ? "instrumental" : m.stem_b);
   const bars = h("select", { class: "field" }, [8, 16, 32, 64, 128].map((n) => h("option", { value: n, selected: n === 32 }, `${n} taktów`)));
   const fmt = h("select", { class: "field" }, ["wav", "flac", "mp3"].map((f) => h("option", { value: f, selected: f === app.settings.export_format }, f.toUpperCase())));
@@ -272,6 +284,9 @@ export function helpModal() {
       row("C / Shift + C", "Dodaj cue w najbliższym beacie na decku A / B"),
       row("Przeciągnij waveform", "Płynne przewijanie utworu (jak w Traktorze). Kółko: zoom, Ctrl + kółko: o jeden beat"),
       row("Shift + przeciągnij", "Przesuń siatkę beatów razem z cue. Shift + kółko: siatka o 1 ms"),
+      row("A / S / D", "Kill: bas / środek / góra na decku A (z Shift: deck B)"),
+      row("Gałki EQ i FILTR", "Przeciągnij w górę / w dół albo kółko myszy, dwuklik = środek. Filtr: w lewo low-pass, w prawo high-pass"),
+      row("Perkusja / Bas / Melodia / Wokal", "Wycisz ścieżkę (Shift + klik = solo). Wymaga rozdzielenia na stemy (wersja Pro)"),
       row("Ctrl + Z", "Cofnij ostatnią zmianę cue, siatki lub tonacji"),
       row("‹ ›  (przytrzymaj)", "Chwilowo zwolnij / przyspiesz deck, żeby dograć fazę na ucho"),
       row("▦ Siatka", "Popraw BPM (×2, ÷2), „Beat tutaj”, „Raz tutaj”, przesuń lub usuń cue"),

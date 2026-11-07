@@ -40,6 +40,7 @@ def run_stems() -> bool:
         t0 = time.time()
         engine = stems.separate(path, Path(tmp), 1, "htdemucs")
         sizes = {s: os.path.getsize(stems.stem_path(Path(tmp), 1, s)) for s in stems.STEMS}
-        ok = engine == "demucs" and all(v > 10000 for v in sizes.values())
+        sizes.update({s: os.path.getsize(stems.stem_path(Path(tmp), 1, s)) for s in stems.STEMS4})
+        ok = engine == "demucs4" and all(v > 10000 for v in sizes.values())
         print(json.dumps({"ok": ok, "engine": engine, "sizes": sizes, "seconds": round(time.time() - t0, 1)}))
         return ok

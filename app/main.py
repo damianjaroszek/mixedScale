@@ -25,8 +25,8 @@ from .jobs import Analyzer, Jobs, run_stems, wave_path
 
 WEB = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "web"
 BROWSER_EXT = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
-STEM_CHOICES = ("full", "vocals", "instrumental")
-STEM_LABEL = {"full": "", "vocals": " (Acapella)", "instrumental": " (Instrumental)"}
+STEM_CHOICES = ("full", "vocals", "instrumental", "drums", "bass", "other")
+STEM_LABEL = {"full": "", "vocals": " (Acapella)", "instrumental": " (Instrumental)", "drums": " (Perkusja)", "bass": " (Bas)", "other": " (Melodia)"}
 
 db = DB()
 jobs = Jobs()
@@ -361,6 +361,16 @@ def track_vocals(tid: int):
     return FileResponse(p, media_type="application/json")
 
 
+@app.get("/api/tracks/{tid}/stemwave")
+def track_stemwave(tid: int):
+    p = stems.stem_dir(CACHE, tid) / "stemwave.json"
+    if not p.exists():
+        if not stems.has_stems4(CACHE, tid):
+            raise HTTPException(404, "Brak 4 stemów")
+        p.write_text(json.dumps(stems.stem_waves(CACHE, tid)))
+    return FileResponse(p, media_type="application/json")
+
+
 @app.get("/api/tracks/{tid}/cover")
 def track_cover(tid: int):
     p = CACHE / "covers" / f"{tid}.img"
@@ -371,11 +381,33 @@ def track_cover(tid: int):
     return Response(data, media_type=mime, headers={"Cache-Control": "max-age=86400"})
 
 
+def _stem_label(stem: str) -> str:
+    if stem.startswith("mute:"):
+        muted = [m for m in stem[5:].split(",") if m]
+        return f" (bez: {', '.join(STEM_LABEL.get(m, m).strip(' ()').lower() for m in muted)})" if muted else ""
+    return STEM_LABEL.get(stem, "")
+
+
 def _source_for(t: dict, stem: str) -> str:
-    if stem == "full":
+    if stem == "full" or stem == "mute:":
         return t["path"]
-    if not stems.has_stems(CACHE, t["id"]):
-        raise HTTPException(409, "Najpierw rozdziel utwór na stemy")
+    if stem.startswith("mute:"):  # 4-stem mix with some stems muted
+        muted = {m for m in stem[5:].split(",") if m}
+        keep = [s for s in stems.STEMS4 if s not in muted]
+        if not stems.has_stems4(CACHE, t["id"]):
+            raise HTTPException(409, "Najpierw rozdziel utwór na 4 stemy")
+        if not keep:
+            raise HTTPException(400, "Wszystkie stemy są wyciszone")
+        if len(keep) == 1:
+            return str(stems.stem_path(CACHE, t["id"], keep[0]))
+        dst = stems.stem_dir(CACHE, t["id"]) / f"mix_{'_'.join(keep)}.flac"
+        if not dst.exists():
+            ins = sum((["-i", str(stems.stem_path(CACHE, t["id"], s))] for s in keep), [])
+            ffmpeg.run([*ins, "-filter_complex", "".join(f"[{i}:a]" for i in range(len(keep))) + f"amix=inputs={len(keep)}:normalize=0[o]",
+                        "-map", "[o]", "-c:a", "flac", str(dst)])
+        return str(dst)
+    if not stems.stem_path(CACHE, t["id"], stem).exists():
+        raise HTTPException(409, "Najpierw rozdziel utwór na stemy" + (" (4 ścieżki wymagają Demucs, wersja Pro)" if stem in ("drums", "bass", "other") else ""))
     return str(stems.stem_path(CACHE, t["id"], stem))
 
 
@@ -385,7 +417,7 @@ _prefetch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch"
 
 
 def _variant(t: dict, stem: str, semitones: int, tempo: float, ext: str = ".flac", fast: bool = False) -> str:
-    if stem not in STEM_CHOICES:
+    if stem not in STEM_CHOICES and not stem.startswith("mute:"):
         raise HTTPException(400, "Zły stem")
     if not -12 <= semitones <= 12 or not 0.5 <= tempo <= 2.0:
         raise HTTPException(400, "Zakres zmiany tonacji/tempa poza limitem")
@@ -503,7 +535,7 @@ def export_track(req: ExportReq):
     def work(progress):
         key = camelot.transpose(t["key"], req.semitones) if t["key"] else ""
         shift = f" {req.semitones:+d}" if req.semitones else ""
-        name = _safe_name(f"{t['artist']} - {t['title']}{STEM_LABEL[req.stem]} [{key}{shift}]")
+        name = _safe_name(f"{t['artist']} - {t['title']}{_stem_label(req.stem)} [{key}{shift}]")
         dst = _export_dir() / f"{name}.{fmt}"
         src = _source_for(t, req.stem)
         ffmpeg.render(src, str(dst), req.semitones, 1.0)

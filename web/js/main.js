@@ -107,8 +107,9 @@ class App {
     const ta = a.track, tb = b.track;
     const pa = { ...a.params }, pb = { ...b.params };
     a.stop(); b.stop();
-    if (tb) await this.loadDeck("A", tb.id, { semitones: pb.semitones, stem: pb.stem, keepB: true }); else { a.track = null; a.updateInfo(); }
-    if (ta) await this.loadDeck("B", ta.id, { semitones: pa.semitones, stem: pa.stem }); else { b.track = null; b.updateInfo(); }
+    const sa = a.muteString(), sb = b.muteString();
+    if (tb) await this.loadDeck("A", tb.id, { semitones: pb.semitones, stem: sb, keepB: true }); else { a.track = null; a.updateInfo(); }
+    if (ta) await this.loadDeck("B", ta.id, { semitones: pa.semitones, stem: sa }); else { b.track = null; b.updateInfo(); }
   }
 
   onDeckChange(deck) {
@@ -204,7 +205,7 @@ class App {
     if (!a.track || !b.track) { toast("Wczytaj utwory do obu decków", { error: true }); return; }
     await api.post("/api/mashups", {
       track_a: a.track.id, track_b: b.track.id, shift_a: a.params.semitones, shift_b: b.params.semitones,
-      cue_a: a.cueTime(a.selCue), cue_b: b.cueTime(b.selCue), stem_a: a.params.stem, stem_b: b.params.stem, rating: 0,
+      cue_a: a.cueTime(a.selCue), cue_b: b.cueTime(b.selCue), stem_a: a.muteString(), stem_b: b.muteString(), rating: 0,
     });
     this.mashupCount++;
     this.renderPlaylists();
@@ -370,10 +371,10 @@ class App {
     toast(action === "remove" ? "Usunięto z biblioteki" : action === "reanalyze" ? "Dodano do kolejki analizy" : "Gotowe");
   }
 
-  async stemsFor(ids) {
-    toast(`Separacja stemów: ${ids.length} utw. (działa w tle)`);
+  async stemsFor(ids, force = false) {
+    toast(`Separacja stemów: ${ids.length} utw. (działa w tle, możesz dalej pracować)`);
     for (const id of ids) {
-      try { await api.waitJob(await api.post(`/api/tracks/${id}/stems`)); this.updateTrack(await api.get(`/api/tracks/${id}`)); }
+      try { await api.waitJob(await api.post(`/api/tracks/${id}/stems${force ? "?force=1" : ""}`)); this.updateTrack(await api.get(`/api/tracks/${id}`)); }
       catch (err) { toast(err.message, { error: true }); }
     }
     toast("Stemy gotowe");
@@ -404,6 +405,12 @@ class App {
         toast(`Zapisano playlistę: ${r.path}`, { ms: 8000, action: { label: "Otwórz folder", fn: () => api.post("/api/open-folder", { path: r.path }) } });
       } catch (err) { toast(err.message, { error: true }); }
     });
+    $("#btnPlStems").addEventListener("click", () => {
+      const want = this.status?.demucs ? "demucs4" : null;
+      const ids = (this.plTrackIds || []).filter((id) => { const t = this.byId.get(id); return t && t.status === "done" && (want ? t.stems !== want : !t.stems || t.stems === "none"); });
+      if (!ids.length) return toast("Wszystkie utwory z tej playlisty mają już stemy");
+      this.stemsFor(ids, !!want);
+    });
     // drag files from the OS
     let depth = 0;
     const ov = $("#dropOverlay");
@@ -428,6 +435,7 @@ class App {
       else if (e.code === "KeyL") A.toggleLoop();
       else if (e.code === "KeyK") B.toggleLoop();
       else if (e.code === "KeyC") (e.shiftKey ? B : A).addCueHere();
+      else if (["KeyA", "KeyS", "KeyD"].includes(e.code) && !e.ctrlKey && !e.metaKey) (e.shiftKey ? B : A).toggleKill({ KeyA: "low", KeyS: "mid", KeyD: "high" }[e.code]);
       else if (/^Digit[1-8]$/.test(e.code)) (e.shiftKey ? B : A).jumpCue(Number(e.code.slice(5)) - 1);
       else return;
       this.syncTestButton();
