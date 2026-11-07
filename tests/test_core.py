@@ -326,9 +326,8 @@ def test_ni_stem_box(tmp_path):
     dst = tmp_path / "x.stem.mp4"
     nistem.write_stem_file(str(src), [str(src)] * 4, str(dst), {"title": "X", "artist": "Y", "bpm": 128.0, "key": "8A"})
     data = dst.read_bytes()
-    assert b"stem" in data and b"Drums" in data or b"drums" in data
-    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(dst)],
-                         capture_output=True, text=True).stdout.split()
-    assert out == ["aac"] * 5
-    dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(dst), "-map", "0:4", "-f", "null", "-"], capture_output=True, text=True)
+    assert b"stem" in data and (b"Drums" in data or b"drums" in data)
+    info = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-i", str(dst)], capture_output=True, text=True).stderr
+    assert info.count("Audio: aac") == 5
+    dec = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(dst), "-map", "0:4", "-f", "null", "-"], capture_output=True, text=True)
     assert dec.returncode == 0 and not dec.stderr.strip()
