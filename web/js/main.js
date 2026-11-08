@@ -42,6 +42,8 @@ class App {
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
+    // Sync follows the real beats (see Deck.phaseLock); setInterval keeps running when the window is in the background
+    setInterval(() => { for (const d of Object.values(this.decks)) d.phaseLock(); }, 100);
   }
 
   // ------------------------------------------------------------------ data
@@ -163,7 +165,7 @@ class App {
     const wasTesting = this.decks.A.playing && b.playing;
     b.sync = true;
     await this.loadDeck("B", idea.track_id, { semitones: idea.shift_b }); // starts at its first drop
-    if (wasTesting) b.play(b.cueTime(b.selCue), b.quantizedStart());
+    if (wasTesting) b.playAligned(b.cueTime(b.selCue), "bar");
   }
 
   // ------------------------------------------------------------------ center panel

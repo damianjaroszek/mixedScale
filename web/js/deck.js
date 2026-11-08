@@ -25,6 +25,9 @@ export class Deck {
     this.startCtx = 0;
     this.startBuf = 0;
     this.rate = 1;
+    this.beatmap = null;
+    this.userOffset = 0; // phase the DJ set by ear with the nudge buttons while synced (s of track time)
+    this.nudging = false;
     this.pausedOrig = 0;
     this.loop = { on: false, beats: 16, start: 0, end: 0 };
     this.zoom = 0;
@@ -87,8 +90,15 @@ export class Deck {
     this.gridBtn = h("button", { class: "btn", title: "Popraw siatkę beatów, BPM i cue pointy", onclick: (e) => this.gridPopover(e.currentTarget) }, "▦ Siatka");
     const nudge = (label, r, title) => {
       const b = h("button", { class: "btn nudge", title }, label);
-      const on = (e) => { e.preventDefault(); this.setRate(r); b.classList.add("on"); };
-      const off = () => { if (this.rate !== 1) this.setRate(1); b.classList.remove("on"); };
+      const on = (e) => { e.preventDefault(); this.nudging = true; this.setRate(r); b.classList.add("on"); };
+      const off = () => {
+        if (!this.nudging) return;
+        this.nudging = false;
+        if (this.rate !== 1) this.setRate(1);
+        b.classList.remove("on");
+        const e = this.lockError(true);
+        if (e != null) this.userOffset = e; // keep the phase the DJ chose by ear
+      };
       b.addEventListener("pointerdown", on);
       ["pointerup", "pointerleave", "pointercancel"].forEach((ev) => b.addEventListener(ev, off));
       return b;
@@ -182,8 +192,61 @@ export class Deck {
     api.get(`/api/tracks/${track.id}/waveform`).then((w) => { if (this.track?.id === track.id) { this.wave = w; this.draw(); } }).catch(() => {});
     this.loadVocals();
     this.loadStemWave();
+    this.beatmap = null;
+    this.userOffset = 0;
+    this.loadBeatmap();
     this.computeSyncTempo();
     await this.loadVariant();
+  }
+
+  // ------------------------------------------------------------------ beat map: where the real kicks are
+  loadBeatmap() {
+    const id = this.track?.id, bpm = this.track?.bpm;
+    if (!id || !bpm || this.beatmapLoading === `${id}@${bpm}`) return;
+    this.beatmapLoading = `${id}@${bpm}`;
+    api.get(`/api/tracks/${id}/beatmap`).then((bm) => { if (this.track?.id === id) this.beatmap = bm; })
+      .catch(() => {}).finally(() => { this.beatmapLoading = null; });
+  }
+
+  // offset (s) of the real kick from the beat grid at this position
+  devAt(pos) {
+    const bm = this.beatmap, t = this.track;
+    if (!bm || !t?.bpm || !bm.dev?.length) return 0;
+    if (Math.abs(bm.bpm - t.bpm) > 1e-4) { this.loadBeatmap(); return 0; } // grid was edited
+    const x = (pos - (t.beat_offset || 0)) / (60 / t.bpm);
+    const n = bm.dev.length;
+    if (x <= 0) return bm.dev[0];
+    if (x >= n - 1) return bm.dev[n - 1];
+    const i = Math.floor(x), f = x - i;
+    return bm.dev[i] * (1 - f) + bm.dev[i + 1] * f;
+  }
+
+  // How far (s of this track) this deck must move so its real beats hit the partner's real beats.
+  // raw = true ignores the DJ's own offset (used to capture it after a nudge). null = not synced/playing.
+  lockError(raw = false, pos = this.position(), lead = 0) {
+    const p = this.app.partner(this);
+    if (!this.sync || !p.playing || !p.track?.bpm || !this.track?.bpm) return null;
+    const posP = p.position() + lead * p.speed;
+    const myBeat = 60 / this.track.bpm, pBeat = 60 / p.track.bpm;
+    const frac = (x) => x - Math.floor(x);
+    let d = frac((posP - (p.track.beat_offset || 0)) / pBeat) - frac((pos - (this.track.beat_offset || 0)) / myBeat);
+    d -= Math.round(d);
+    const err = d * myBeat + this.devAt(pos) - p.devAt(posP) * (this.speed / p.speed);
+    return raw ? err : err - this.userOffset;
+  }
+
+  // Sync that follows the music, not only the grid: tiny speed corrections (max 0.4 %, inaudible)
+  // keep the kicks of both decks together even where a track's tempo wanders a bit.
+  phaseLock() {
+    if (this.nudging || !this.playing) return;
+    const e = this.lockError();
+    let r = 1;
+    if (e != null && Math.abs(e) < 0.25) {
+      const real = e / ((this.bufTempo || 1)); // seconds of real time
+      if (Math.abs(real) > 0.0007) r = 1 + Math.max(-0.004, Math.min(0.004, real * 0.8));
+      else if (this.rate !== 1 && Math.abs(real) > 0.0002) r = this.rate; // keep going until it is really in phase
+    }
+    if (Math.abs(r - this.rate) > 1e-6) this.setRate(r);
   }
 
   // ------------------------------------------------------------------ 4 stems (drums / bass / melody / vocals)
@@ -384,36 +447,56 @@ export class Deck {
   pause() {
     this.pausedOrig = this.position();
     this.killSource();
+    this.rate = 1;
     this.playing = false;
     this.updateInfo();
   }
 
-  stop() { this.killSource(); this.playing = false; }
+  stop() { this.killSource(); this.playing = false; this.rate = 1; }
 
   toggle() {
     if (!this.track) return;
     if (this.playing) this.pause();
-    else this.play(this.pausedOrig, this.quantizedStart());
+    else this.playAligned(this.pausedOrig, "bar");
   }
 
-  seek(orig) {
+  seek(orig, unit = "beat") {
     orig = Math.max(0, Math.min(orig, this.track?.duration || 0));
-    if (this.playing) this.play(orig, this.quantizedStart());
+    if (this.playing) this.playAligned(orig, unit);
     else { this.pausedOrig = orig; this.draw(); }
   }
 
-  // when the partner deck plays and sync is on, start on its next bar so downbeats line up
-  quantizedStart() {
+  // Start (or jump) right away, without waiting for the next bar: the position is moved by less than half
+  // a bar/beat so that this deck keeps the phase. With Sync the reference is the other deck (bars line up,
+  // so a cue on a drop lands exactly on the partner's next downbeat); playing alone it is this deck's own
+  // beat before the jump. Like Traktor's quantize, but instant.
+  alignedPos(orig, unit = "bar", lead = 0.03) {
     const p = this.app.partner(this);
-    if (!this.sync && !p.sync) return 0;
-    if (!p.playing || !p.track) return 0;
-    const bar = 240 / p.track.bpm;
-    const pos = p.position();
-    const fd = p.track.first_downbeat || 0;
-    let next = fd + Math.ceil((pos - fd) / bar + 1e-6) * bar;
-    let dt = (next - pos) / p.speed;
-    if (dt < 0.06) dt += bar / p.speed;
-    return ctx.currentTime + dt;
+    if (!this.track?.bpm) return orig;
+    const synced = (this.sync || p.sync) && p.playing && p.track?.bpm;
+    const ref = synced ? p : this.playing ? this : null;
+    if (!ref) return orig;
+    if (!synced) unit = "beat";
+    const beats = unit === "bar" ? 4 : 1;
+    const anchor = (t) => (unit === "bar" ? t.first_downbeat ?? t.beat_offset : t.beat_offset) || 0;
+    const refLen = (60 * beats) / ref.track.bpm;
+    const refPos = ref.position() + lead * ref.speed;
+    const myLen = (60 * beats) / this.track.bpm;
+    const frac = (x) => x - Math.floor(x);
+    let d = frac((refPos - anchor(ref.track)) / refLen) - frac((orig - anchor(this.track)) / myLen);
+    d -= Math.round(d); // nearest: at most half a bar/beat earlier or later
+    let pos = orig + d * myLen;
+    if (pos < 0) pos += myLen;
+    if (synced && this.sync) { // also line up the real kicks (beat map) and the DJ's own offset
+      const e = this.lockError(false, pos, lead);
+      if (e != null && Math.abs(e) < 0.1) pos += e;
+    }
+    return Math.max(0, pos);
+  }
+
+  playAligned(orig, unit = "bar") {
+    const lead = 0.03;
+    this.play(this.alignedPos(orig, unit, lead), ctx.currentTime + lead);
   }
 
   cues() { return this.track?.cues || []; }
@@ -425,7 +508,7 @@ export class Deck {
     this.renderPads();
     const t = this.cueTime(i);
     if (this.loop.on) this.setLoopAt(t);
-    if (this.playing) this.play(t, this.quantizedStart());
+    if (this.playing) this.playAligned(t, "bar");
     else { this.pausedOrig = t; this.draw(); }
   }
 
@@ -833,7 +916,7 @@ export class Deck {
         Object.assign(t, orig);
         if (Math.abs(dt) > 0.0005) this.shiftGrid(dt, `Siatka przesunięta o ${(dt * 1000).toFixed(0)} ms`);
         else this.draw();
-      } else if (wasPlaying) this.play(this.pausedOrig, this.quantizedStart());
+      } else if (wasPlaying) this.playAligned(this.pausedOrig, "beat");
     };
     this.waveBox.addEventListener("pointermove", move);
     this.waveBox.addEventListener("pointerup", up);

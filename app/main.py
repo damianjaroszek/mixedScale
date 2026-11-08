@@ -523,6 +523,32 @@ def track_vocals(tid: int):
     return FileResponse(p, media_type="application/json")
 
 
+@app.get("/api/tracks/{tid}/beatmap")
+def track_beatmap(tid: int):
+    """Per-beat offset of the real kick from the beat grid (computed once per BPM, cached)."""
+    from . import analysis
+    from .ffmpeg import decode
+    t = _track_or_404(tid)
+    if not t.get("bpm"):
+        return {"bpm": None, "offset": 0, "dev": []}
+    d = CACHE / "beatmap"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{tid}.json"
+    if p.exists():
+        try:
+            bm = json.loads(p.read_text())
+            if abs(bm["bpm"] - t["bpm"]) < 1e-4:
+                return {**bm, "offset": t["beat_offset"] or 0.0}
+        except Exception:
+            pass
+    sr = 22050
+    y = decode(t["path"], sr)
+    off = float(t["beat_offset"] or 0.0)
+    bm = {"bpm": t["bpm"], "dev": analysis.beat_deviation(y, sr, float(t["bpm"]), off)}
+    p.write_text(json.dumps(bm))
+    return {**bm, "offset": off}
+
+
 @app.get("/api/tracks/{tid}/stemwave")
 def track_stemwave(tid: int):
     p = stems.stem_dir(CACHE, tid) / "stemwave.json"

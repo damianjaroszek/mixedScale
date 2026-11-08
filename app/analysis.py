@@ -610,3 +610,39 @@ def analyze_file(path: str, learned: dict | None = None, bpm_range: tuple[float,
     feats = key_features(yk, tempo["bpm"], tempo["first_downbeat"] - (len(y) - len(yk)) / 2 / SR)
     key = key_from_features(feats, learned)
     return {"duration": round(dur, 3), **key, **tempo, **struct, "key_features": feats}
+
+
+def beat_deviation(y: np.ndarray, sr: int, bpm: float, offset: float) -> list[float]:
+    """How far the real kick sits from the straight beat grid, per beat (seconds, smoothed, median 0).
+    Synced decks use it to follow the actual beats, so tracks whose tempo wanders a little
+    (live drums, old records, slightly wrong BPM) stay locked instead of slowly drifting apart."""
+    period = 60.0 / bpm
+    dur = len(y) / sr
+    n = int((dur - offset) / period) + 1
+    beats = offset + np.arange(max(0, n)) * period
+    if len(beats) < 16:
+        return []
+
+    def smooth(dev: np.ndarray, w: int = 8) -> np.ndarray:
+        ok = ~np.isnan(dev)
+        if ok.sum() < 8:
+            return np.zeros(len(dev))
+        idx = np.arange(len(dev))
+        out = np.array([np.nanmedian(dev[max(0, i - w): i + w + 1]) if ok[max(0, i - w): i + w + 1].sum() >= 3 else np.nan for i in idx])
+        good = ~np.isnan(out)
+        return np.interp(idx, idx[good], out[good])
+
+    t, st = _attack_times(y, sr, beats, win=0.08)
+    dev = t - beats
+    if (~np.isnan(dev)).sum() < 16:
+        return []
+    weak = st < 0.25 * np.nanpercentile(st[st > 0], 90) if (st > 0).any() else np.ones(len(st), bool)
+    dev[weak] = np.nan
+    s1 = smooth(dev)
+    # second pass: narrow window around where the kicks actually are (follows larger drifts)
+    t2, st2 = _attack_times(y, sr, beats + s1, win=0.03)
+    dev2 = t2 - beats
+    dev2[st2 < 0.25 * np.percentile(st2, 90)] = np.nan
+    s2 = smooth(dev2)
+    s2 -= np.median(s2)
+    return [round(float(x), 4) for x in s2]

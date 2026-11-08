@@ -331,3 +331,29 @@ def test_ni_stem_box(tmp_path):
     assert info.count("Audio: aac") == 5
     dec = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(dst), "-map", "0:4", "-f", "null", "-"], capture_output=True, text=True)
     assert dec.returncode == 0 and not dec.stderr.strip()
+
+
+def test_beat_map_follows_wandering_tempo():
+    """Beat map: per-beat offset of the real kicks from a straight grid (used by Sync to stay locked)."""
+    import numpy as np
+    from app import analysis
+    sr, dur = 22050, 120
+    ks, t = [], 0.2
+    while t < dur - 1:
+        ks.append(t)
+        t += 60 / 128 * (1 + 0.002 * np.sin(t / 12))
+    rng = np.random.default_rng(1)
+    y = (rng.standard_normal(sr * dur) * 0.01).astype(np.float32)
+    n = int(0.12 * sr)
+    kick = np.sin(2 * np.pi * 55 * np.arange(n) / sr) * np.exp(-np.arange(n) / sr / 0.04)
+    for k in ks:
+        y[int(k * sr): int(k * sr) + n] += kick
+    r = analysis.detect_tempo(y, sr)
+    dev = np.array(analysis.beat_deviation(y, sr, r["bpm"], r["beat_offset"]))
+    grid = r["beat_offset"] + np.arange(len(dev)) * 60 / r["bpm"]
+    m = grid < ks[-1] - 0.5
+    ks = np.array(ks)
+    true = np.array([ks[np.argmin(np.abs(ks - g))] - g for g in grid[m]])
+    true -= np.median(true)
+    assert np.abs(true).max() > 0.008  # the tempo really wanders
+    assert np.percentile(np.abs(true - dev[m]), 95) < 0.002
