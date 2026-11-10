@@ -41,13 +41,24 @@ def client():
     from app.main import app
 
     with TestClient(app) as c:
-        r = c.post("/api/import/folder", json={"path": str(music)})
-        assert r.json()["added"] == len(CASES) + 1
+        job = c.post("/api/import/folder", json={"path": str(music)}).json()
+        for _ in range(100):
+            if job["status"] != "running":
+                break
+            time.sleep(0.2)
+            job = c.get(f"/api/jobs/{job['id']}").json()
+        assert job["result"]["added"] == len(CASES) + 1
+        seen_batch = False
         for _ in range(300):
-            st = c.get("/api/status").json()["counts"]
+            full = c.get("/api/status").json()
+            st = full["counts"]
+            if full.get("batch"):
+                seen_batch = True
+                assert full["batch"]["total"] == len(CASES) + 1
             if st.get("done", 0) + st.get("error", 0) == len(CASES) + 1:
                 break
             time.sleep(1)
+        assert seen_batch and c.get("/api/status").json()["batch"] is None
         yield c
 
 

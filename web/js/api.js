@@ -20,10 +20,10 @@ export const api = {
   patch: (u, b) => req("PATCH", u, b),
   del: (u) => req("DELETE", u),
   // poll a background job until it finishes
-  async waitJob(job, onProgress) {
+  async waitJob(job, onProgress, everyMs = 1000) {
     while (job.status === "running") {
-      onProgress?.(job.progress || 0);
-      await new Promise((r) => setTimeout(r, 1000));
+      onProgress?.(job.progress || 0, job);
+      await new Promise((r) => setTimeout(r, everyMs));
       job = await req("GET", `/api/jobs/${job.id}`);
     }
     if (job.status === "error") throw new Error(job.error || "Zadanie nie powiodło się");

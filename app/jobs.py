@@ -25,8 +25,10 @@ class Jobs:
         with self.lock:
             self.jobs[jid] = job
 
-        def progress(p: float):
+        def progress(p: float, detail: str | None = None):
             job["progress"] = round(float(p), 3)
+            if detail is not None:
+                job["detail"] = detail
 
         def runner():
             try:
@@ -38,7 +40,10 @@ class Jobs:
                 job["status"] = "error"
                 job["error"] = str(exc)
 
-        self.pool.submit(runner)
+        if kind == "import":  # never wait behind long stem jobs
+            threading.Thread(target=runner, daemon=True).start()
+        else:
+            self.pool.submit(runner)
         return job
 
     def get(self, jid: str) -> dict | None:
@@ -105,6 +110,23 @@ class Analyzer(threading.Thread):
         self.pool = None
         self.pool_size = 0
         self.warmed = False
+        # the current batch (from the moment the queue gets work until it is empty again), for the progress bar
+        self.batch_started: float | None = None
+        self.batch_done = 0
+        self.batch_errors = 0
+        self.names: dict[int, str] = {}
+
+    def batch(self, waiting: int) -> dict | None:
+        if self.batch_started is None or not waiting:
+            return None
+        done = self.batch_done + self.batch_errors
+        total = done + waiting
+        eta = None
+        el = time.time() - self.batch_started
+        if done >= 2 and el > 5:
+            eta = round(el / done * waiting)
+        return {"done": done, "errors": self.batch_errors, "total": total, "eta_s": eta,
+                "now": [self.names[i] for i in list(self.running)[:2] if i in self.names]}
 
     @property
     def current(self):
@@ -137,13 +159,18 @@ class Analyzer(threading.Thread):
             if free > 0:
                 ids = tuple(self.running) or (-1,)
                 rows = self.db.q(f"SELECT id, path FROM tracks WHERE status = 'pending' AND id NOT IN ({','.join('?' * len(ids))}) ORDER BY id LIMIT ?", (*ids, free))
+            if not rows and not self.running:
+                self.batch_started = None
             if rows:
+                if self.batch_started is None:
+                    self.batch_started, self.batch_done, self.batch_errors = time.time(), 0, 0
                 if not self.running:
                     self._ensure_pool(n)
                 learned = settings.get("learned_profiles")
                 rng = parse_range(settings.get("bpm_range"))
                 for row in rows:
                     self.db.update("tracks", row["id"], {"status": "analyzing", "error": None})
+                    self.names[row["id"]] = os.path.splitext(os.path.basename(row["path"]))[0]
                     try:
                         fut = self.pool.submit(analyze_job, row["path"], learned, rng)
                     except Exception:  # broken pool (e.g. a worker crashed): rebuild it
@@ -178,8 +205,12 @@ class Analyzer(threading.Thread):
         except Exception as exc:
             traceback.print_exc()
             self.db.update("tracks", tid, {"status": "error", "error": str(exc)[:500] or exc.__class__.__name__})
+            self.batch_errors += 1
+        else:
+            self.batch_done += 1
         finally:
             self.running.pop(tid, None)
+            self.names.pop(tid, None)
             self.wake.set()
 
 

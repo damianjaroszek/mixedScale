@@ -80,6 +80,7 @@ def status():
         "rubberband": ffmpeg.has_rubberband(),
         "demucs": stems.demucs_available(),
         "jobs": jobs.active(),
+        "batch": analyzer.batch((counts.get("pending") or 0) + (counts.get("analyzing") or 0)),
     }
 
 
@@ -393,9 +394,21 @@ def import_folder(req: FolderReq):
         files = [os.path.join(d, f) for d, _, fs in os.walk(root) for f in fs if tags.is_audio(f)]
     else:
         raise HTTPException(400, "Folder nie istnieje")
-    added = [tid for f in sorted(files) if (tid := _add_file(f))]
-    analyzer.kick()
-    return {"found": len(files), "added": len(added)}
+
+    def work(progress):
+        added, files_sorted = 0, sorted(files)
+        for i, f in enumerate(files_sorted):
+            if _add_file(f):
+                added += 1
+                if added % 25 == 0:
+                    analyzer.kick()  # start analysing while the rest is still being read
+            if i % 10 == 0:
+                progress(i / max(1, len(files_sorted)), f"{i} z {len(files_sorted)} plików")
+        analyzer.kick()
+        return {"found": len(files_sorted), "added": added}
+
+    name = os.path.basename(root.rstrip("/\\")) or root
+    return jobs.submit("import", work, label=f"Skanowanie: {name}")
 
 
 @app.post("/api/import/upload")

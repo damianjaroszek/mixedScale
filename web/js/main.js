@@ -79,12 +79,42 @@ class App {
       if (waiting) { pill.textContent = `Analiza: ${waiting} w kolejce`; pill.className = "pill busy"; }
       else if (stemJobs.length) { pill.textContent = `W tle: ${stemJobs.length} zad.`; pill.className = "pill busy"; }
       else { pill.textContent = `${c.done || 0} utworów gotowych`; pill.className = "pill muted"; }
-      if (!prev || JSON.stringify(prev.counts) !== JSON.stringify(st.counts) || prev.analyzing !== st.analyzing) {
+      this.renderScanBar(st);
+      const changed = !prev || JSON.stringify(prev.counts) !== JSON.stringify(st.counts) || prev.analyzing !== st.analyzing;
+      // the library table is reloaded at most every 4 s during a long analysis (big libraries)
+      if (changed) this.refreshDue = true;
+      if (this.refreshDue && (!waiting || Date.now() - (this.lastRefresh || 0) > 4000)) {
+        this.refreshDue = false;
+        this.lastRefresh = Date.now();
         await this.refresh();
         if (this.decks.A.track && !this.ideas.length) this.refreshIdeas();
       }
     } catch { $("#queueStatus").textContent = "Brak połączenia z serwerem"; }
     setTimeout(() => this.poll(), waitingMs(this.status));
+  }
+
+  // progress of folder scanning and of the analysis queue, under the header
+  renderScanBar(st) {
+    const el = $("#scanBar");
+    const imp = (st.jobs || []).find((j) => j.kind === "import" && j.status === "running");
+    const b = st.batch;
+    let pct = null, text = "";
+    if (imp) {
+      pct = (imp.progress || 0) * 100;
+      text = `${imp.label}: ${imp.detail || "…"}`;
+      if (b) text += ` · analiza ${b.done} gotowych`;
+    } else if (b && b.total) {
+      pct = (b.done / b.total) * 100;
+      const eta = b.eta_s == null ? "liczę czas…" : b.eta_s < 60 ? "zostało < 1 min" : b.eta_s < 3600 ? `zostało ok. ${Math.round(b.eta_s / 60)} min` : `zostało ok. ${Math.floor(b.eta_s / 3600)} h ${Math.round((b.eta_s % 3600) / 60)} min`;
+      text = `Analiza: ${b.done} z ${b.total} (${Math.floor(pct)}%) · ${eta}`;
+      if (b.errors) text += ` · błędy: ${b.errors}`;
+      if (b.now?.length) text += ` · teraz: ${b.now.join(", ")}`;
+    }
+    el.classList.toggle("hidden", pct == null);
+    if (pct == null) return;
+    el.querySelector(".fill").style.width = `${Math.max(1, Math.min(100, pct)).toFixed(1)}%`;
+    el.querySelector(".txt").textContent = text;
+    el.setAttribute("aria-valuenow", Math.round(pct));
   }
 
   // ------------------------------------------------------------------ decks
@@ -499,7 +529,7 @@ class App {
 
 function waitingMs(st) {
   const c = st?.counts || {};
-  return (c.pending || c.analyzing || (st?.jobs || []).some((j) => j.status === "running")) ? 2000 : 6000;
+  return (c.pending || c.analyzing || (st?.jobs || []).some((j) => j.status === "running")) ? 1000 : 6000;
 }
 
 const app = new App();

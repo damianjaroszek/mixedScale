@@ -202,9 +202,13 @@ export function importModal(app) {
     if (!path.value.trim()) return;
     scan.disabled = true;
     try {
-      const r = await api.post("/api/import/folder", { path: path.value.trim() });
+      let job = await api.post("/api/import/folder", { path: path.value.trim() });
+      prog.classList.remove("hidden");
+      scan.textContent = "Skanuję…";
+      job = await api.waitJob(job, (p) => { bar.style.width = `${Math.round(p * 100)}%`; }, 400);
+      const r = job.result;
       closeModal();
-      toast(`Znaleziono ${r.found} plików, dodano ${r.added}. Analiza działa w tle.`);
+      toast(`Znaleziono ${r.found} plików, dodano ${r.added}. Analiza działa w tle (pasek postępu pod nagłówkiem).`);
       app.refresh();
     } catch (err) { toast(err.message, { error: true }); scan.disabled = false; }
   });
