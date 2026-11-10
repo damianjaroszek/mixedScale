@@ -455,6 +455,7 @@ class App {
     });
     window.addEventListener("keydown", (e) => {
       if (e.target.closest("input,textarea,select") || document.querySelector(".modal-back")) return;
+      if (e.repeat && !e.code.startsWith("Arrow")) return; // holding a key must not toggle Play / kills again and again
       const A = this.decks.A, B = this.decks.B;
       if (e.code === "KeyZ" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); return; }
       else if (e.code === "Space") { e.preventDefault(); this.testMashup(); }

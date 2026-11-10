@@ -260,3 +260,5 @@ table.grid { width: 100%; border-collapse: collapse; }
 .stem-btn.muted { background: none; color: var(--muted); border-color: var(--line); text-decoration: line-through; }
 .stem-btn.pending { opacity: .55; border-style: dashed; }
 .grid td.acts { max-width: none; overflow: visible; }
+.play.wait { animation: playwait 0.6s ease-in-out infinite alternate; }
+@keyframes playwait { from { opacity: 1; } to { opacity: 0.35; } }

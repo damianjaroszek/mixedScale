@@ -25,6 +25,8 @@ export class Deck {
     this.startCtx = 0;
     this.startBuf = 0;
     this.rate = 1;
+    this.vari = 1; // varispeed while the time-stretched version is still being prepared
+    this.pendingPlay = false;
     this.beatmap = null;
     this.userOffset = 0; // phase the DJ set by ear with the nudge buttons while synced (s of track time)
     this.nudging = false;
@@ -72,7 +74,7 @@ export class Deck {
     });
     this.waveBox.addEventListener("wheel", (e) => this.onWaveWheel(e), { passive: false });
 
-    this.playBtn = h("button", { class: "play", title: "Odtwórz / pauza", onclick: () => this.toggle() }, "▶");
+    this.playBtn = h("button", { class: "play", title: "Odtwórz / pauza (Q / W)", onpointerdown: (e) => { if (e.button === 0) this.toggle(); } }, "▶"); // on press, not release: like a hardware button
     this.nameEl = h("div", { class: "deck-name" }, "—");
     this.swapBtn = h("button", { class: "btn", onclick: () => this.app.swapDecks() }, this.name === "A" ? "Do decku B →" : "← Do decku A");
     this.keyEl = h("span");
@@ -162,6 +164,7 @@ export class Deck {
     this.loopSize.textContent = String(this.loop.beats);
     this.syncBtn.classList.toggle("on", this.sync);
     this.playBtn.classList.toggle("on", this.playing);
+    this.playBtn.classList.toggle("wait", this.pendingPlay && !this.playing);
     this.playBtn.textContent = this.playing ? "❚❚" : "▶";
     this.emptyEl.classList.toggle("hidden", !!t);
     this.renderPads();
@@ -172,6 +175,12 @@ export class Deck {
   async load(track, { semitones = 0, stem = "full", cue } = {}) {
     this.stop();
     this.track = track;
+    // forget the previous track's audio right away, so Play / cues during loading can never play it
+    this.buffer = null;
+    this.stemBuffers = null;
+    this.bufTempo = 1;
+    this.vari = 1;
+    this.pendingPlay = false;
     this.mutes.clear();
     this.params = { stem: track.stems && track.stems !== "none" && track.stems !== "running" ? stem : "full", semitones, tempo: 1 };
     if (this.params.stem.startsWith("mute:")) { // saved mashup: 4 stems with some muted
@@ -242,7 +251,7 @@ export class Deck {
     const e = this.lockError();
     let r = 1;
     if (e != null && Math.abs(e) < 0.25) {
-      const real = e / ((this.bufTempo || 1)); // seconds of real time
+      const real = e / ((this.bufTempo || 1) * this.vari); // seconds of real time
       if (Math.abs(real) > 0.0007) r = 1 + Math.max(-0.004, Math.min(0.004, real * 0.8));
       else if (this.rate !== 1 && Math.abs(real) > 0.0002) r = this.rate; // keep going until it is really in phase
     }
@@ -344,42 +353,61 @@ export class Deck {
   async loadVariant() {
     if (!this.track) return;
     const token = ++this.loadToken;
+    const track = this.track;
     const { stem, semitones, tempo } = this.params;
     const what = stem !== "full" ? STEM_NAMES[stem] : semitones ? "zmiana tonacji" : Math.abs(tempo - 1) > 1e-4 ? "dopasowanie tempa" : "wczytywanie";
     this.setBusy(`⏳ ${what}…`);
-    const wasPlaying = this.playing;
-    const pos = this.position();
-    try {
-      const get = async (st, semi) => {
-        const r = await fetch(`/api/tracks/${this.track.id}/audio?stem=${st}&semitones=${semi}&tempo=${tempo.toFixed(5)}`);
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-        return ctx.decodeAudioData(await r.arrayBuffer());
-      };
-      let buf, stemBufs = null;
+    const get = async (st, semi, tmp) => {
+      const r = await fetch(`/api/tracks/${track.id}/audio?stem=${st}&semitones=${semi}&tempo=${tmp.toFixed(5)}`);
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      return ctx.decodeAudioData(await r.arrayBuffer());
+    };
+    const fetchSet = async (semi, tmp) => {
       if (stem === "stems") {
-        const list = await Promise.all(STEMS4.map((st) => get(st, st === "drums" && this.keepDrums ? 0 : semitones)));
-        stemBufs = Object.fromEntries(STEMS4.map((st, i) => [st, list[i]]));
-        buf = stemBufs.other;
-      } else buf = await get(stem, semitones);
-      if (token !== this.loadToken) return;
-      this.stemBuffers = stemBufs;
-      this.prefetchNeighbours();
-      if (wasPlaying && this.playing) {
+        const list = await Promise.all(STEMS4.map((st) => get(st, st === "drums" && this.keepDrums ? 0 : semi, tmp)));
+        const stemBufs = Object.fromEntries(STEMS4.map((st, i) => [st, list[i]]));
+        return { buf: stemBufs.other, stemBufs };
+      }
+      return { buf: await get(stem, semi, tmp), stemBufs: null };
+    };
+    const install = ({ buf, stemBufs }, bufTempo, vari) => {
+      if (this.playing && this.buffer) {
         // seamless swap: keep the musical position (and so the phase against the other deck)
         const lead = 0.04;
-        const at = ctx.currentTime + lead;
-        const posAt = this.position() + lead * (this.bufTempo || 1) * this.rate; // measured on the OLD buffer
+        const posAt = this.position() + lead * this.speed; // measured on the OLD buffer
         this.buffer = buf;
-        this.bufTempo = tempo;
-        this.play(posAt, at);
+        this.stemBuffers = stemBufs;
+        this.bufTempo = bufTempo;
+        this.vari = vari;
+        this.play(posAt, ctx.currentTime + lead);
       } else {
         this.buffer = buf;
-        this.bufTempo = tempo;
-        this.pausedOrig = pos;
+        this.stemBuffers = stemBufs;
+        this.bufTempo = bufTempo;
+        this.vari = vari;
       }
+      if (this.pendingPlay && !this.playing) { this.pendingPlay = false; this.playAligned(this.pausedOrig, "bar"); }
+      this.updateInfo();
+    };
+    try {
+      const final = fetchSet(semitones, tempo);
+      // A fresh track that needs time-stretching: play the original right away at a matched speed
+      // (like a turntable, key moves a little) and switch to the stretched version when it is ready.
+      if (!this.buffer && (Math.abs(tempo - 1) > 1e-4 || semitones)) {
+        const quick = await Promise.race([fetchSet(0, 1), final.then(() => null)]).catch(() => null);
+        if (token !== this.loadToken) return;
+        if (quick && !this.buffer) {
+          install(quick, 1, tempo);
+          this.setBusy(`⏳ ${what}… (gra już, tonacja jeszcze bez korekty)`);
+        }
+      }
+      const set = await final;
+      if (token !== this.loadToken) return;
+      install(set, tempo, 1);
+      this.prefetchNeighbours();
       this.setBusy("");
     } catch (err) {
-      if (token === this.loadToken) { this.setBusy(""); toast(`Deck ${this.name}: ${err.message}`, { error: true }); }
+      if (token === this.loadToken) { this.setBusy(""); this.pendingPlay = false; toast(`Deck ${this.name}: ${err.message}`, { error: true }); }
     }
     this.updateInfo();
     this.app.onDeckChange(this);
@@ -391,7 +419,7 @@ export class Deck {
 
   position() {
     if (!this.playing || !this.buffer) return this.pausedOrig;
-    let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate;
+    let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate * this.vari;
     if (this.source?.loop) {
       const ls = this.source.loopStart, le = this.source.loopEnd;
       if (b >= le && le > ls) b = ls + ((b - ls) % (le - ls));
@@ -400,7 +428,7 @@ export class Deck {
   }
 
   // seconds of original track time per second of real time
-  get speed() { return (this.bufTempo || 1) * this.rate; }
+  get speed() { return (this.bufTempo || 1) * this.vari * this.rate; }
 
   play(fromOrig = this.position(), when = 0) {
     if (!this.buffer) return;
@@ -415,7 +443,7 @@ export class Deck {
     let src;
     if (this.stemBuffers) src = new SourceGroup(ctx, STEMS4.map((st) => ({ buffer: this.stemBuffers[st], dest: this.stemGains[st] })));
     else { src = ctx.createBufferSource(); src.buffer = this.buffer; src.connect(this.channel.input); }
-    src.playbackRate.value = this.rate;
+    src.playbackRate.value = this.rate * this.vari;
     const startB = Math.max(0, Math.min(this.toBuf(fromOrig), this.buffer.duration - 0.01));
     if (this.loop.on) this.applyLoop(src);
     src.start(at, startB);
@@ -430,12 +458,12 @@ export class Deck {
   // pitch-bend nudge: temporarily speed up / slow down to fix the phase by ear
   setRate(r) {
     if (this.playing && this.source) {
-      let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate;
+      let b = this.startBuf + Math.max(0, ctx.currentTime - this.startCtx) * this.rate * this.vari;
       const ls = this.source.loopStart, le = this.source.loopEnd;
       if (this.source.loop && b >= le && le > ls) b = ls + ((b - ls) % (le - ls));
       this.startBuf = b;
       this.startCtx = Math.max(ctx.currentTime, this.startCtx);
-      this.source.playbackRate.setValueAtTime(r, ctx.currentTime);
+      this.source.playbackRate.setValueAtTime(r * this.vari, ctx.currentTime);
     }
     this.rate = r;
   }
@@ -456,6 +484,11 @@ export class Deck {
 
   toggle() {
     if (!this.track) return;
+    if (!this.buffer) { // still loading: start as soon as the audio is there
+      this.pendingPlay = !this.pendingPlay;
+      this.updateInfo();
+      return;
+    }
     if (this.playing) this.pause();
     else this.playAligned(this.pausedOrig, "bar");
   }
@@ -745,7 +778,7 @@ export class Deck {
       const b = h("button", {
         class: "pad" + (i === this.selCue ? " sel" : "") + ` lab-${c.label.toLowerCase()}`,
         title: `Cue ${i + 1}: ${c.label}, energia ${c.energy}, ${fmtTime(c.time)}\nKlik: skocz (w rytm drugiego decku). Prawy klik: przesuń / usuń.`,
-        onclick: () => this.jumpCue(i),
+        onpointerdown: (e) => { if (e.button === 0) this.jumpCue(i); },
         oncontextmenu: (e) => { e.preventDefault(); this.selCue = i; this.renderPads(); this.draw(); this.gridPopover(b); },
       }, h("b", {}, String(i + 1)), h("span", {}, c.label), h("small", {}, fmtTime(c.time)));
       b.style.setProperty("--e", c.energy / 10);
